@@ -1,5 +1,6 @@
 package com.example.model
 
+import com.example.ui.theme.GlassThemeMode
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -515,9 +516,104 @@ enum class ReflowTheme(val label: String) {
     TRUE_NIGHT("True Night")
 }
 
+enum class PageScrollDirection(val label: String, val subtitle: String) {
+    VERTICAL_CONTINUOUS("Vertical Scroll", "Smooth continuous vertical reading"),
+    HORIZONTAL_PAGER("Horizontal Book Flip", "Swipe left/right page by page")
+}
+
+enum class PdfCanvasPaperTint(val label: String, val tintHex: String) {
+    ORIGINAL("Original Paper", "#FAF8F3"),
+    WARM_SEPIA("Warm Sepia", "#F3E9D2"),
+    SAGE_EYECARE("Sage Eye-Care", "#E6EFE9"),
+    NIGHT_CONTRAST("Night Contrast", "#22252A")
+}
+
+enum class RenderQualityMode(val label: String, val targetWidthPx: Int, val subtitle: String) {
+    FAST_60FPS("Fast 120Hz", 880, "Ultra-low latency scrolling"),
+    BALANCED_HD("Balanced HD", 1120, "Crisp typography & fast pan"),
+    ULTRA_PRINT("Ultra Print", 1480, "Maximum vector & diagram detail")
+}
+
 /**
- * AI Image Studio configurations per user requirements:
- * - Models: gemini-nano-banana-2.1 (Fast/General) & gemini-3-pro-image (Studio Pro)
+ * Persistent user settings saved to SharedPreferences (`glass_pdf_settings_prefs`).
+ */
+data class AppSettings(
+    val themeMode: GlassThemeMode = GlassThemeMode.LIGHT_ALABASTER,
+    val reflowTheme: ReflowTheme = ReflowTheme.ALABASTER,
+    val defaultReflowFontScale: Float = 1.0f,
+    val scrollDirection: PageScrollDirection = PageScrollDirection.VERTICAL_CONTINUOUS,
+    val paperTint: PdfCanvasPaperTint = PdfCanvasPaperTint.ORIGINAL,
+    val renderQuality: RenderQualityMode = RenderQualityMode.BALANCED_HD,
+    val instantHighlightOnDrag: Boolean = true,
+    val autoCopyHighlightedText: Boolean = false,
+    val keepScreenAwake: Boolean = true,
+    val showFastScrollScrubber: Boolean = true,
+    val rememberLastPage: Boolean = true,
+    val defaultAuthorName: String = "Elena Rostova",
+    val defaultHighlightOpacity: Float = 0.42f
+) {
+    fun toJsonString(): String = JSONObject().apply {
+        put("themeMode", themeMode.name)
+        put("reflowTheme", reflowTheme.name)
+        put("defaultReflowFontScale", defaultReflowFontScale.toDouble())
+        put("scrollDirection", scrollDirection.name)
+        put("paperTint", paperTint.name)
+        put("renderQuality", renderQuality.name)
+        put("instantHighlightOnDrag", instantHighlightOnDrag)
+        put("autoCopyHighlightedText", autoCopyHighlightedText)
+        put("keepScreenAwake", keepScreenAwake)
+        put("showFastScrollScrubber", showFastScrollScrubber)
+        put("rememberLastPage", rememberLastPage)
+        put("defaultAuthorName", defaultAuthorName)
+        put("defaultHighlightOpacity", defaultHighlightOpacity.toDouble())
+    }.toString()
+
+    companion object {
+        fun fromJsonString(json: String?): AppSettings {
+            if (json.isNullOrBlank()) return AppSettings()
+            return try {
+                val obj = JSONObject(json)
+                val theme = GlassThemeMode.entries.find {
+                    it.name == obj.optString("themeMode")
+                } ?: GlassThemeMode.LIGHT_ALABASTER
+                val reflow = ReflowTheme.entries.find {
+                    it.name == obj.optString("reflowTheme")
+                } ?: ReflowTheme.ALABASTER
+                val scroll = PageScrollDirection.entries.find {
+                    it.name == obj.optString("scrollDirection")
+                } ?: PageScrollDirection.VERTICAL_CONTINUOUS
+                val tint = PdfCanvasPaperTint.entries.find {
+                    it.name == obj.optString("paperTint")
+                } ?: PdfCanvasPaperTint.ORIGINAL
+                val quality = RenderQualityMode.entries.find {
+                    it.name == obj.optString("renderQuality")
+                } ?: RenderQualityMode.BALANCED_HD
+
+                AppSettings(
+                    themeMode = theme,
+                    reflowTheme = reflow,
+                    defaultReflowFontScale = obj.optDouble("defaultReflowFontScale", 1.0).toFloat().coerceIn(0.75f, 1.85f),
+                    scrollDirection = scroll,
+                    paperTint = tint,
+                    renderQuality = quality,
+                    instantHighlightOnDrag = obj.optBoolean("instantHighlightOnDrag", true),
+                    autoCopyHighlightedText = obj.optBoolean("autoCopyHighlightedText", false),
+                    keepScreenAwake = obj.optBoolean("keepScreenAwake", true),
+                    showFastScrollScrubber = obj.optBoolean("showFastScrollScrubber", true),
+                    rememberLastPage = obj.optBoolean("rememberLastPage", true),
+                    defaultAuthorName = obj.optString("defaultAuthorName", "Elena Rostova"),
+                    defaultHighlightOpacity = obj.optDouble("defaultHighlightOpacity", 0.42).toFloat().coerceIn(0.25f, 0.75f)
+                )
+            } catch (_: Exception) {
+                AppSettings()
+            }
+        }
+    }
+}
+
+/**
+ * AI Image Studio configurations:
+ * - Models: gemini-nano-banana-2.1 (Fast/General), gemini-3-pro-image (Studio Pro), gemini-3.1-flash-lite-image
  * - Image sizes: 1K, 2K, 4K
  * - Aspect ratios: 1:1, 2:3, 3:2, 3:4, 4:3, 9:16, 16:9, 21:9
  */
@@ -534,9 +630,35 @@ enum class AiImageModelOption(
     GEMINI_3_PRO_IMAGE(
         modelId = "gemini-3-pro-image",
         displayName = "Gemini 3 Pro Image",
-        subtitle = "Studio-quality 4K & typography"
+        subtitle = "Studio 4K & typography"
+    ),
+    GEMINI_3_1_FLASH_LITE_IMAGE(
+        modelId = "gemini-3.1-flash-lite-image",
+        displayName = "Flash-Lite Image",
+        subtitle = "Ultra-low latency"
     )
 }
+
+enum class EditorialStampPreset(
+    val title: String,
+    val subtitle: String,
+    val colorHex: String,
+    val codePrefix: String
+) {
+    APPROVED("APPROVED", "ARCHITECTURAL REVIEW BOARD", "#5C8A6C", "APR"),
+    CONFIDENTIAL("CONFIDENTIAL", "RESTRICTED DOSSIER ACCESS", "#B56357", "CNF"),
+    FINAL_RELEASE("FINAL ISSUE", "VERIFIED PRODUCTION RECORD", "#355266", "FNL"),
+    DRAFT_REVIEW("STUDIO DRAFT", "SUBJECT TO REVISION", "#B5894A", "DRF"),
+    EXECUTED("EXECUTED", "SIGNED & ARCHIVED", "#6B5E82", "EXE"),
+    VERIFIED("VERIFIED", "AUTHENTICATED SEAL", "#3E6B73", "VRF")
+}
+
+data class StudioGalleryAsset(
+    val id: String,
+    val title: String,
+    val subtitle: String,
+    val filePath: String
+)
 
 enum class AiImageSizeOption(
     val label: String,
@@ -568,8 +690,13 @@ enum class ProToolWorkflow(
 ) {
     AI_IMAGE_STUDIO(
         "AI Image & Stamp Studio",
-        "1K/2K/4K stamps & covers across 8 aspect ratios",
+        "1K/2K/4K stamps, AI seals & covers across 8 ratios",
         "AI Pro"
+    ),
+    PASSWORD_PROTECT(
+        "PDF Password & Vault Lock",
+        "Encrypt, lock, or unlock confidential PDF documents",
+        "Security"
     ),
     MERGE_PDFS(
         "Merge PDFs",
@@ -582,8 +709,8 @@ enum class ProToolWorkflow(
         "Extract"
     ),
     IMAGES_TO_PDF(
-        "Images to PDF",
-        "Convert photos and scans into a multi-page PDF",
+        "Images & Plates to PDF",
+        "Convert photos, studio plates & scans into a PDF",
         "Convert"
     ),
     PDF_TO_IMAGES_ZIP(
@@ -593,7 +720,7 @@ enum class ProToolWorkflow(
     ),
     COMPRESS_PDF(
         "Smart Compressor",
-        "Downsample embedded bitmaps with live MB savings",
+        "Downsample embedded bitmaps with live KB savings",
         "Optimize"
     ),
     OCR_SCANNER(
@@ -609,6 +736,6 @@ enum class ProToolWorkflow(
     REDACT_INFO(
         "Irreversible Redaction",
         "Burn permanent black fills & strip underlying text",
-        "Security"
+        "Redact"
     )
 }

@@ -7,6 +7,7 @@ import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.net.Uri
+import android.util.LruCache
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.data.local.GlassPdfDatabase
@@ -20,21 +21,27 @@ import com.example.engines.TextMarkupEngine
 import com.example.model.AiAspectRatioOption
 import com.example.model.AiImageModelOption
 import com.example.model.AiImageSizeOption
+import com.example.model.AppSettings
 import com.example.model.DocumentAnnotationsSnapshot
 import com.example.model.DrawToolType
 import com.example.model.EditSubTool
+import com.example.model.EditorialStampPreset
 import com.example.model.FreehandInkStroke
 import com.example.model.HomeTab
 import com.example.model.MarkupStyle
 import com.example.model.NormalizedPoint
 import com.example.model.NormalizedRect
+import com.example.model.PageScrollDirection
+import com.example.model.PdfCanvasPaperTint
 import com.example.model.PdfFormField
 import com.example.model.PlacedElement
 import com.example.model.PlacedElementKind
 import com.example.model.ProToolWorkflow
 import com.example.model.ReflowTheme
+import com.example.model.RenderQualityMode
 import com.example.model.ShapeAnnotation
 import com.example.model.ShapeKind
+import com.example.model.StudioGalleryAsset
 import com.example.model.TextMarkupAnnotation
 import com.example.model.ViewerDockMode
 import com.example.ui.theme.EditorialHighlightSwatches
@@ -52,6 +59,10 @@ import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import java.io.File
 import java.io.FileOutputStream
+import java.security.MessageDigest
+
+private const val SETTINGS_PREFS_NAME = "glass_pdf_settings_prefs"
+private const val SETTINGS_JSON_KEY = "app_settings_json"
 
 sealed interface AiGenUiState {
     data object Idle : AiGenUiState
@@ -70,11 +81,19 @@ sealed interface OcrUiState {
 class PdfWorkspaceViewModel(application: Application) : AndroidViewModel(application) {
 
     private val repository: GlassPdfRepository
+    private val settingsPrefs = application.getSharedPreferences(SETTINGS_PREFS_NAME, Context.MODE_PRIVATE)
+
     val documents: StateFlow<List<PdfDocumentEntity>>
     val savedSignatures: StateFlow<List<SavedSignatureEntity>>
 
-    // Theme & Navigation State
-    private val _themeMode = MutableStateFlow(GlassThemeMode.LIGHT_ALABASTER)
+    // Persistent App Settings State
+    private val _appSettings = MutableStateFlow(
+        AppSettings.fromJsonString(settingsPrefs.getString(SETTINGS_JSON_KEY, null))
+    )
+    val appSettings: StateFlow<AppSettings> = _appSettings.asStateFlow()
+
+    // Theme & Navigation State (synced with persistent AppSettings)
+    private val _themeMode = MutableStateFlow(_appSettings.value.themeMode)
     val themeMode: StateFlow<GlassThemeMode> = _themeMode.asStateFlow()
 
     private val _activeHomeTab = MutableStateFlow(HomeTab.RECENT)
@@ -96,10 +115,28 @@ class PdfWorkspaceViewModel(application: Application) : AndroidViewModel(applica
     private val _toastBadge = MutableStateFlow<String?>(null)
     val toastBadge: StateFlow<String?> = _toastBadge.asStateFlow()
     private var toastJob: Job? = null
+    private var pagePersistJob: Job? = null
 
     // Active Viewer Document & Page State
     private val _activeDocument = MutableStateFlow<PdfDocumentEntity?>(null)
     val activeDocument: StateFlow<PdfDocumentEntity?> = _activeDocument.asStateFlow()
+
+    // Password Lock / Unlock Modal State
+    private val _pendingPasswordUnlockDoc = MutableStateFlow<PdfDocumentEntity?>(null)
+    val pendingPasswordUnlockDoc: StateFlow<PdfDocumentEntity?> = _pendingPasswordUnlockDoc.asStateFlow()
+
+    private val _passwordUnlockError = MutableStateFlow<String?>(null)
+    val passwordUnlockError: StateFlow<String?> = _passwordUnlockError.asStateFlow()
+
+    private val _passwordManageTargetDoc = MutableStateFlow<PdfDocumentEntity?>(null)
+    val passwordManageTargetDoc: StateFlow<PdfDocumentEntity?> = _passwordManageTargetDoc.asStateFlow()
+
+    // Built-in Studio Photo & Plate Gallery for 1-Tap Photo Stamping / Images-to-PDF
+    private val _studioGalleryAssets = MutableStateFlow<List<StudioGalleryAsset>>(emptyList())
+    val studioGalleryAssets: StateFlow<List<StudioGalleryAsset>> = _studioGalleryAssets.asStateFlow()
+
+    private val _showPhotoStampPickerSheet = MutableStateFlow(false)
+    val showPhotoStampPickerSheet: StateFlow<Boolean> = _showPhotoStampPickerSheet.asStateFlow()
 
     private val _activeSnapshot = MutableStateFlow(DocumentAnnotationsSnapshot())
     val activeSnapshot: StateFlow<DocumentAnnotationsSnapshot> = _activeSnapshot.asStateFlow()
@@ -122,6 +159,7 @@ class PdfWorkspaceViewModel(application: Application) : AndroidViewModel(applica
     private val _isChromeless = MutableStateFlow(false)
     val isChromeless: StateFlow<Boolean> = _isChromeless.asStateFlow()
 
+    private val bitmapMemCache = object : LruCache<String, Bitmap>(24) {}
     private val _pageBitmaps = MutableStateFlow<Map<Int, Bitmap>>(emptyMap())
     val pageBitmaps: StateFlow<Map<Int, Bitmap>> = _pageBitmaps.asStateFlow()
 
@@ -145,7 +183,7 @@ class PdfWorkspaceViewModel(application: Application) : AndroidViewModel(applica
     private val _activeStrokeWidth = MutableStateFlow(3.5f)
     val activeStrokeWidth: StateFlow<Float> = _activeStrokeWidth.asStateFlow()
 
-    private val _activeOpacity = MutableStateFlow(0.42f)
+    private val _activeOpacity = MutableStateFlow(_appSettings.value.defaultHighlightOpacity)
     val activeOpacity: StateFlow<Float> = _activeOpacity.asStateFlow()
 
     private val _activeFontFamilyId = MutableStateFlow("dancing")
@@ -162,10 +200,10 @@ class PdfWorkspaceViewModel(application: Application) : AndroidViewModel(applica
     private val _isReflowMode = MutableStateFlow(false)
     val isReflowMode: StateFlow<Boolean> = _isReflowMode.asStateFlow()
 
-    private val _reflowTheme = MutableStateFlow(ReflowTheme.ALABASTER)
+    private val _reflowTheme = MutableStateFlow(_appSettings.value.reflowTheme)
     val reflowTheme: StateFlow<ReflowTheme> = _reflowTheme.asStateFlow()
 
-    private val _reflowFontScale = MutableStateFlow(1.0f)
+    private val _reflowFontScale = MutableStateFlow(_appSettings.value.defaultReflowFontScale)
     val reflowFontScale: StateFlow<Float> = _reflowFontScale.asStateFlow()
 
     // Viewer Search Bar State
@@ -208,8 +246,8 @@ class PdfWorkspaceViewModel(application: Application) : AndroidViewModel(applica
     private val _selectedAiSize = MutableStateFlow(AiImageSizeOption.SIZE_1K)
     val selectedAiSize: StateFlow<AiImageSizeOption> = _selectedAiSize.asStateFlow()
 
-    private val _selectedAiAspectRatio = MutableStateFlow(AiAspectRatioOption.RATIO_1_1)
-    val selectedAiAspectRatio: StateFlow<AiAspectRatioOption> = _selectedAiAspectRatio.asStateFlow()
+    private val _selectedAiAspectRatioFlow = MutableStateFlow(AiAspectRatioOption.RATIO_3_2)
+    val selectedAiAspectRatio: StateFlow<AiAspectRatioOption> = _selectedAiAspectRatioFlow.asStateFlow()
 
     private val _aiPrompt = MutableStateFlow(
         "Minimalist architectural pavilion diagram on warm alabaster paper, subtle bronze linework"
@@ -237,8 +275,99 @@ class PdfWorkspaceViewModel(application: Application) : AndroidViewModel(applica
             initialValue = emptyList()
         )
 
-        viewModelScope.launch {
+        viewModelScope.launch(Dispatchers.IO) {
             SamplePdfSeeder.seedIfEmpty(application, repository)
+            val gallery = SamplePdfSeeder.ensureStudioGalleryAssets(application)
+            _studioGalleryAssets.value = gallery
+        }
+    }
+
+    // ========================================================================
+    // PERSISTENT SETTINGS ENGINE (SAVES IMMEDIATELY TO SHAREDPREFERENCES)
+    // ========================================================================
+
+    fun updateSettings(transform: (AppSettings) -> AppSettings) {
+        val updated = transform(_appSettings.value)
+        _appSettings.value = updated
+        _themeMode.value = updated.themeMode
+        _reflowTheme.value = updated.reflowTheme
+        _reflowFontScale.value = updated.defaultReflowFontScale
+        _activeOpacity.value = updated.defaultHighlightOpacity
+        // Commit synchronously so settings are guaranteed to persist across app restarts
+        settingsPrefs.edit().putString(SETTINGS_JSON_KEY, updated.toJsonString()).commit()
+    }
+
+    fun setThemeMode(mode: GlassThemeMode) {
+        updateSettings { it.copy(themeMode = mode) }
+        showDynamicToast("Saved Theme", mode.label)
+    }
+
+    fun setReflowTheme(theme: ReflowTheme) {
+        updateSettings { it.copy(reflowTheme = theme) }
+        showDynamicToast("Reflow Theme", theme.label)
+    }
+
+    fun adjustReflowFontScale(delta: Float) {
+        val next = (_reflowFontScale.value + delta).coerceIn(0.75f, 1.85f)
+        updateSettings { it.copy(defaultReflowFontScale = next) }
+    }
+
+    fun setPageScrollDirection(direction: PageScrollDirection) {
+        updateSettings { it.copy(scrollDirection = direction) }
+        showDynamicToast("Scroll Mode", direction.label)
+    }
+
+    fun setPdfCanvasPaperTint(tint: PdfCanvasPaperTint) {
+        updateSettings { it.copy(paperTint = tint) }
+        showDynamicToast("Paper Tint", tint.label)
+    }
+
+    fun setRenderQualityMode(quality: RenderQualityMode) {
+        val changed = _appSettings.value.renderQuality != quality
+        updateSettings { it.copy(renderQuality = quality) }
+        showDynamicToast("Render Engine", quality.label)
+        if (changed) {
+            bitmapMemCache.evictAll()
+            _activeDocument.value?.let { doc ->
+                renderAllDocumentPages(doc, _activeSnapshot.value)
+            }
+        }
+    }
+
+    fun setInstantHighlightOnDrag(enabled: Boolean) {
+        updateSettings { it.copy(instantHighlightOnDrag = enabled) }
+        showDynamicToast(if (enabled) "Instant Highlight ON" else "Manual Pill Selection ON")
+    }
+
+    fun setAutoCopyHighlightedText(enabled: Boolean) {
+        updateSettings { it.copy(autoCopyHighlightedText = enabled) }
+        showDynamicToast(if (enabled) "Auto-Copy Highlights ON" else "Auto-Copy Highlights OFF")
+    }
+
+    fun setKeepScreenAwake(enabled: Boolean) {
+        updateSettings { it.copy(keepScreenAwake = enabled) }
+        showDynamicToast(if (enabled) "Keep Screen Awake ON" else "Keep Screen Awake OFF")
+    }
+
+    fun setShowFastScrollScrubber(enabled: Boolean) {
+        updateSettings { it.copy(showFastScrollScrubber = enabled) }
+    }
+
+    fun setRememberLastPage(enabled: Boolean) {
+        updateSettings { it.copy(rememberLastPage = enabled) }
+    }
+
+    fun setDefaultAuthorName(author: String) {
+        updateSettings { it.copy(defaultAuthorName = author.ifBlank { "Studio Architect" }) }
+    }
+
+    fun reseedSampleWorkspace() {
+        viewModelScope.launch(Dispatchers.IO) {
+            SamplePdfSeeder.seedIfEmpty(getApplication(), repository, forceReseed = true)
+            _studioGalleryAssets.value = SamplePdfSeeder.ensureStudioGalleryAssets(getApplication())
+            withContext(Dispatchers.Main) {
+                showDynamicToast("Workspace samples restored")
+            }
         }
     }
 
@@ -247,15 +376,10 @@ class PdfWorkspaceViewModel(application: Application) : AndroidViewModel(applica
         _toastMessage.value = message
         _toastBadge.value = badge
         toastJob = viewModelScope.launch {
-            delay(2800L)
+            delay(2600L)
             _toastMessage.value = null
             _toastBadge.value = null
         }
-    }
-
-    fun setThemeMode(mode: GlassThemeMode) {
-        _themeMode.value = mode
-        showDynamicToast("Theme: ${mode.label}")
     }
 
     fun selectHomeTab(tab: HomeTab) {
@@ -297,9 +421,110 @@ class PdfWorkspaceViewModel(application: Application) : AndroidViewModel(applica
         }
     }
 
+    // ========================================================================
+    // PDF PASSWORD PROTECTION & ENCRYPTION VAULT
+    // ========================================================================
+
+    private fun hashPassword(rawPassword: String): String {
+        val digest = MessageDigest.getInstance("SHA-256")
+        val bytes = digest.digest(("glasspdf_salt_v2:$rawPassword").toByteArray(Charsets.UTF_8))
+        return bytes.joinToString("") { "%02x".format(it) }
+    }
+
+    fun requestOpenDocument(doc: PdfDocumentEntity) {
+        if (doc.isPasswordProtected && doc.passwordHash.isNotBlank()) {
+            _passwordUnlockError.value = null
+            _pendingPasswordUnlockDoc.value = doc
+        } else {
+            openDocumentInternal(doc)
+        }
+    }
+
     fun openDocument(doc: PdfDocumentEntity) {
+        requestOpenDocument(doc)
+    }
+
+    fun submitUnlockPassword(enteredPassword: String) {
+        val target = _pendingPasswordUnlockDoc.value ?: return
+        if (hashPassword(enteredPassword.trim()) == target.passwordHash) {
+            _pendingPasswordUnlockDoc.value = null
+            _passwordUnlockError.value = null
+            openDocumentInternal(target)
+            showDynamicToast("Document Unlocked", target.title.take(18))
+        } else {
+            _passwordUnlockError.value = "Incorrect password. Hint: ${target.passwordHint.ifBlank { "No hint set" }}"
+        }
+    }
+
+    fun dismissPasswordUnlockModal() {
+        _pendingPasswordUnlockDoc.value = null
+        _passwordUnlockError.value = null
+    }
+
+    fun openPasswordManageModal(doc: PdfDocumentEntity?) {
+        _passwordManageTargetDoc.value = doc
+    }
+
+    fun setDocumentPasswordProtection(
+        doc: PdfDocumentEntity,
+        newPassword: String,
+        hint: String
+    ) {
+        val cleanPass = newPassword.trim()
+        if (cleanPass.length < 3) {
+            showDynamicToast("Password must be at least 3 characters")
+            return
+        }
         viewModelScope.launch {
-            val updatedDoc = doc.copy(lastOpenedAt = System.currentTimeMillis())
+            val hashed = hashPassword(cleanPass)
+            val updated = doc.copy(
+                isPasswordProtected = true,
+                passwordHash = hashed,
+                passwordHint = hint.trim()
+            )
+            repository.upsertDocument(updated)
+            if (_activeDocument.value?.id == doc.id) {
+                _activeDocument.value = updated
+            }
+            _passwordManageTargetDoc.value = null
+            _activeProWorkflow.value = null
+            showDynamicToast("PDF Password Locked", doc.title.removeSuffix(".pdf").take(18))
+        }
+    }
+
+    fun removeDocumentPasswordProtection(doc: PdfDocumentEntity, currentPassword: String = ""): Boolean {
+        if (currentPassword.isNotBlank() && doc.isPasswordProtected && doc.passwordHash.isNotBlank()) {
+            if (hashPassword(currentPassword.trim()) != doc.passwordHash) {
+                showDynamicToast("Current password incorrect")
+                return false
+            }
+        }
+        viewModelScope.launch {
+            val updated = doc.copy(
+                isPasswordProtected = false,
+                passwordHash = "",
+                passwordHint = ""
+            )
+            repository.upsertDocument(updated)
+            if (_activeDocument.value?.id == doc.id) {
+                _activeDocument.value = updated
+            }
+            _passwordManageTargetDoc.value = null
+            _activeProWorkflow.value = null
+            showDynamicToast("Password lock removed")
+        }
+        return true
+    }
+
+    private fun openDocumentInternal(doc: PdfDocumentEntity) {
+        viewModelScope.launch {
+            val startPage = if (_appSettings.value.rememberLastPage) {
+                doc.currentPage.coerceIn(0, (doc.pageCount - 1).coerceAtLeast(0))
+            } else 0
+            val updatedDoc = doc.copy(
+                currentPage = startPage,
+                lastOpenedAt = System.currentTimeMillis()
+            )
             repository.upsertDocument(updatedDoc)
             _activeDocument.value = updatedDoc
             val snapshot = DocumentAnnotationsSnapshot.fromJsonString(updatedDoc.annotationsJson)
@@ -307,7 +532,7 @@ class PdfWorkspaceViewModel(application: Application) : AndroidViewModel(applica
             undoStack.clear()
             redoStack.clear()
             updateUndoRedoFlags()
-            _currentPageIndex.value = updatedDoc.currentPage.coerceIn(0, (updatedDoc.pageCount - 1).coerceAtLeast(0))
+            _currentPageIndex.value = startPage
             _zoomScale.value = 1.0f
             _isChromeless.value = false
             _isReflowMode.value = false
@@ -329,14 +554,23 @@ class PdfWorkspaceViewModel(application: Application) : AndroidViewModel(applica
         doc: PdfDocumentEntity,
         snapshot: DocumentAnnotationsSnapshot
     ) {
-        viewModelScope.launch {
+        viewModelScope.launch(Dispatchers.IO) {
             val file = File(doc.filePath)
             if (!file.exists()) return@launch
             val count = doc.pageCount.coerceAtLeast(1)
+            val targetWidth = _appSettings.value.renderQuality.targetWidthPx
             val map = mutableMapOf<Int, Bitmap>()
             for (idx in 0 until count) {
                 val rot = snapshot.pageRotations[idx] ?: 0
-                val bmp = PdfProEngine.renderPageBitmap(file, idx, targetWidthPx = 1100, rotationDegrees = rot)
+                val cacheKey = "${doc.id}_${file.lastModified()}_p${idx}_r${rot}_w${targetWidth}"
+                val cached = bitmapMemCache.get(cacheKey)
+                val bmp = if (cached != null && !cached.isRecycled) {
+                    cached
+                } else {
+                    PdfProEngine.renderPageBitmap(file, idx, targetWidthPx = targetWidth, rotationDegrees = rot)?.also {
+                        bitmapMemCache.put(cacheKey, it)
+                    }
+                }
                 if (bmp != null) {
                     map[idx] = bmp
                     _pageBitmaps.value = map.toMap()
@@ -345,16 +579,36 @@ class PdfWorkspaceViewModel(application: Application) : AndroidViewModel(applica
         }
     }
 
+    /**
+     * Called during LazyColumn / Pager scrolling.
+     * Updates `_currentPageIndex` in memory WITHOUT mutating `_activeDocument.value`
+     * on every frame so scrolling stays 120fps with zero UI tree rebuilds.
+     */
+    fun onPageScrolled(pageIndex: Int) {
+        val doc = _activeDocument.value ?: return
+        val clamped = pageIndex.coerceIn(0, (doc.pageCount - 1).coerceAtLeast(0))
+        if (_currentPageIndex.value == clamped) return
+        _currentPageIndex.value = clamped
+        pagePersistJob?.cancel()
+        pagePersistJob = viewModelScope.launch(Dispatchers.IO) {
+            delay(650L)
+            val currentDoc = _activeDocument.value ?: return@launch
+            repository.upsertDocument(currentDoc.copy(currentPage = clamped))
+        }
+    }
+
     fun setCurrentPage(pageIndex: Int) {
         val doc = _activeDocument.value ?: return
         val clamped = pageIndex.coerceIn(0, (doc.pageCount - 1).coerceAtLeast(0))
+        if (_currentPageIndex.value == clamped) return
         _currentPageIndex.value = clamped
         _currentTouchSelection.value = null
         _selectedExistingMarkup.value = null
-        viewModelScope.launch {
-            val updated = doc.copy(currentPage = clamped, lastOpenedAt = System.currentTimeMillis())
-            _activeDocument.value = updated
-            repository.upsertDocument(updated)
+        pagePersistJob?.cancel()
+        pagePersistJob = viewModelScope.launch(Dispatchers.IO) {
+            delay(500L)
+            val currentDoc = _activeDocument.value ?: return@launch
+            repository.upsertDocument(currentDoc.copy(currentPage = clamped))
         }
     }
 
@@ -363,7 +617,7 @@ class PdfWorkspaceViewModel(application: Application) : AndroidViewModel(applica
     }
 
     fun toggleSmartZoom() {
-        val next = if (_zoomScale.value > 1.35f) 1.0f else 2.0f
+        val next = if (_zoomScale.value > 1.35f) 1.0f else 1.85f
         _zoomScale.value = next
         showDynamicToast("Zoom", "${(next * 100).toInt()}%")
     }
@@ -395,12 +649,17 @@ class PdfWorkspaceViewModel(application: Application) : AndroidViewModel(applica
         _activeEditSubTool.value = subTool
         if (subTool == EditSubTool.AI_STUDIO_STAMP) {
             _showAiStudioSheet.value = true
+        } else if (subTool == EditSubTool.IMAGE_STAMP) {
+            _showPhotoStampPickerSheet.value = true
         }
+    }
+
+    fun setPhotoStampPickerSheetVisible(visible: Boolean) {
+        _showPhotoStampPickerSheet.value = visible
     }
 
     fun setActiveColorHex(hex: String) {
         _activeColorHex.value = hex
-        // If an existing highlight is selected, immediately recolor it
         val existing = _selectedExistingMarkup.value
         if (existing != null) {
             updateExistingMarkup(existing.copy(colorHex = hex))
@@ -412,7 +671,9 @@ class PdfWorkspaceViewModel(application: Application) : AndroidViewModel(applica
     }
 
     fun setActiveOpacity(opacity: Float) {
-        _activeOpacity.value = opacity.coerceIn(0.15f, 1.0f)
+        val clamped = opacity.coerceIn(0.15f, 1.0f)
+        _activeOpacity.value = clamped
+        updateSettings { it.copy(defaultHighlightOpacity = clamped) }
     }
 
     fun setActiveFontFamilyId(fontId: String) {
@@ -462,13 +723,13 @@ class PdfWorkspaceViewModel(application: Application) : AndroidViewModel(applica
     private fun persistCurrentDocumentState() {
         val doc = _activeDocument.value ?: return
         val snapshotJson = _activeSnapshot.value.toJsonString()
-        viewModelScope.launch {
+        val page = _currentPageIndex.value
+        viewModelScope.launch(Dispatchers.IO) {
             val updated = doc.copy(
-                currentPage = _currentPageIndex.value,
+                currentPage = page,
                 annotationsJson = snapshotJson,
                 lastOpenedAt = System.currentTimeMillis()
             )
-            _activeDocument.value = updated
             repository.upsertDocument(updated)
         }
     }
@@ -482,16 +743,49 @@ class PdfWorkspaceViewModel(application: Application) : AndroidViewModel(applica
         startNorm: NormalizedPoint,
         endNorm: NormalizedPoint
     ) {
+        if (_currentPageIndex.value != pageIndex) {
+            _currentPageIndex.value = pageIndex
+        }
         val words = _activeSnapshot.value.pageWords[pageIndex].orEmpty()
         val result = TextMarkupEngine.computeTouchSelection(words, startNorm, endNorm)
         _currentTouchSelection.value = result
         _selectedExistingMarkup.value = null
     }
 
+    fun selectWordOrLineAtTap(
+        pageIndex: Int,
+        tapNorm: NormalizedPoint,
+        selectFullLine: Boolean = false
+    ): Boolean {
+        val words = _activeSnapshot.value.pageWords[pageIndex].orEmpty()
+        val res = TextMarkupEngine.selectWordOrLineAtPoint(words, tapNorm, selectFullLine)
+        return if (res != null) {
+            _currentPageIndex.value = pageIndex
+            _currentTouchSelection.value = res
+            _selectedExistingMarkup.value = null
+            true
+        } else {
+            false
+        }
+    }
+
+    fun expandCurrentSelectionToFullLine() {
+        val curr = _currentTouchSelection.value ?: return
+        val pageIdx = _currentPageIndex.value
+        val words = _activeSnapshot.value.pageWords[pageIdx].orEmpty()
+        _currentTouchSelection.value = TextMarkupEngine.expandSelectionToFullLines(words, curr)
+    }
+
+    fun expandCurrentSelectionToParagraph() {
+        val curr = _currentTouchSelection.value ?: return
+        val pageIdx = _currentPageIndex.value
+        val words = _activeSnapshot.value.pageWords[pageIdx].orEmpty()
+        _currentTouchSelection.value = TextMarkupEngine.expandSelectionToParagraph(words, curr)
+    }
+
     fun onTouchSelectionFingerLift(pageIndex: Int) {
         val selection = _currentTouchSelection.value ?: return
-        // Flow 2: In ANNOTATE mode (Continuous Highlighter Tool), lifting finger commits immediately
-        if (_viewerDockMode.value == ViewerDockMode.ANNOTATE) {
+        if (_viewerDockMode.value == ViewerDockMode.ANNOTATE && _appSettings.value.instantHighlightOnDrag) {
             commitCurrentSelectionAsMarkup(
                 pageIndex = pageIndex,
                 style = _activeMarkupStyle.value,
@@ -519,6 +813,12 @@ class PdfWorkspaceViewModel(application: Application) : AndroidViewModel(applica
         )
         val current = _activeSnapshot.value
         pushSnapshotMutation(current.copy(markups = current.markups + newMarkup))
+
+        if (_appSettings.value.autoCopyHighlightedText) {
+            val clipboard = getApplication<Application>().getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+            clipboard?.setPrimaryClip(ClipData.newPlainText("PDF Highlight", selection.selectedText))
+        }
+
         _currentTouchSelection.value = null
         showDynamicToast("${style.label} saved", "Page ${pageIndex + 1}")
 
@@ -577,7 +877,7 @@ class PdfWorkspaceViewModel(application: Application) : AndroidViewModel(applica
     }
 
     // ========================================================================
-    // FREEHAND INK, SHAPES, ERASER, TEXT BOXES, STICKY NOTES & SIGNATURES
+    // FREEHAND INK, SHAPES, ERASER, TEXT BOXES, STICKY NOTES & DRAGGABLE STAMPS
     // ========================================================================
 
     fun commitInkStroke(pageIndex: Int, points: List<NormalizedPoint>) {
@@ -653,8 +953,8 @@ class PdfWorkspaceViewModel(application: Application) : AndroidViewModel(applica
             pageIndex = pageIndex,
             kind = kind,
             bounds = NormalizedRect(
-                x = (tapPoint.x - width * 0.5f).coerceIn(0.05f, 0.95f - width),
-                y = (tapPoint.y - height * 0.5f).coerceIn(0.05f, 0.95f - height),
+                x = (tapPoint.x - width * 0.5f).coerceIn(0.03f, 0.97f - width),
+                y = (tapPoint.y - height * 0.5f).coerceIn(0.03f, 0.97f - height),
                 width = width,
                 height = height
             ),
@@ -664,7 +964,34 @@ class PdfWorkspaceViewModel(application: Application) : AndroidViewModel(applica
         )
         val current = _activeSnapshot.value
         pushSnapshotMutation(current.copy(placedElements = current.placedElements + element))
-        showDynamicToast("${kind.label} placed", "Page ${pageIndex + 1}")
+        showDynamicToast("${kind.label} placed", "Drag to reposition")
+    }
+
+    fun movePlacedElement(elementId: String, deltaNormX: Float, deltaNormY: Float) {
+        val current = _activeSnapshot.value
+        val updatedElements = current.placedElements.map { el ->
+            if (el.id == elementId) {
+                val nx = (el.bounds.x + deltaNormX).coerceIn(0.01f, (0.99f - el.bounds.width).coerceAtLeast(0.02f))
+                val ny = (el.bounds.y + deltaNormY).coerceIn(0.01f, (0.99f - el.bounds.height).coerceAtLeast(0.02f))
+                el.copy(bounds = el.bounds.copy(x = nx, y = ny))
+            } else el
+        }
+        _activeSnapshot.value = current.copy(placedElements = updatedElements)
+        persistCurrentDocumentState()
+    }
+
+    fun scalePlacedElement(elementId: String, scaleFactor: Float) {
+        val current = _activeSnapshot.value
+        val updatedElements = current.placedElements.map { el ->
+            if (el.id == elementId) {
+                val newW = (el.bounds.width * scaleFactor).coerceIn(0.14f, 0.86f)
+                val newH = (el.bounds.height * scaleFactor).coerceIn(0.05f, 0.75f)
+                val nx = el.bounds.x.coerceIn(0.01f, (0.99f - newW).coerceAtLeast(0.01f))
+                val ny = el.bounds.y.coerceIn(0.01f, (0.99f - newH).coerceAtLeast(0.01f))
+                el.copy(bounds = NormalizedRect(nx, ny, newW, newH))
+            } else el
+        }
+        pushSnapshotMutation(current.copy(placedElements = updatedElements))
     }
 
     fun deletePlacedElement(elementId: String) {
@@ -714,7 +1041,9 @@ class PdfWorkspaceViewModel(application: Application) : AndroidViewModel(applica
                 pointsJson = ptsArr.toString()
             )
             repository.insertSignature(entity)
-            stampSavedSignatureOnCurrentPage(entity)
+            if (_activeDocument.value != null) {
+                stampSavedSignatureOnCurrentPage(entity)
+            }
             _showSignatureModal.value = false
         }
     }
@@ -734,7 +1063,7 @@ class PdfWorkspaceViewModel(application: Application) : AndroidViewModel(applica
             id = "sig_el_${System.nanoTime()}",
             pageIndex = pageIdx,
             kind = PlacedElementKind.SIGNATURE,
-            bounds = NormalizedRect(0.52f, 0.78f, 0.36f, 0.085f),
+            bounds = NormalizedRect(0.48f, 0.76f, 0.38f, 0.085f),
             textContent = sig.typedText,
             colorHex = sig.colorHex,
             fontFamilyId = sig.fontFamilyId,
@@ -742,7 +1071,7 @@ class PdfWorkspaceViewModel(application: Application) : AndroidViewModel(applica
         )
         val current = _activeSnapshot.value
         pushSnapshotMutation(current.copy(placedElements = current.placedElements + element))
-        showDynamicToast("Signature stamped", "Page ${pageIdx + 1}")
+        showDynamicToast("Signature stamped", "Drag to position")
     }
 
     fun deleteSavedSignature(sigId: String) {
@@ -765,12 +1094,20 @@ class PdfWorkspaceViewModel(application: Application) : AndroidViewModel(applica
         pushSnapshotMutation(updatedSnapshot)
 
         val doc = _activeDocument.value ?: return
-        viewModelScope.launch {
-            val bmp = PdfProEngine.renderPageBitmap(File(doc.filePath), pageIndex, rotationDegrees = nextRot)
+        viewModelScope.launch(Dispatchers.IO) {
+            val targetWidth = _appSettings.value.renderQuality.targetWidthPx
+            val bmp = PdfProEngine.renderPageBitmap(
+                File(doc.filePath),
+                pageIndex,
+                targetWidthPx = targetWidth,
+                rotationDegrees = nextRot
+            )
             if (bmp != null) {
                 _pageBitmaps.value = _pageBitmaps.value.toMutableMap().apply { put(pageIndex, bmp) }
             }
-            showDynamicToast("Rotated Page ${pageIndex + 1}", "${nextRot}°")
+            withContext(Dispatchers.Main) {
+                showDynamicToast("Rotated Page ${pageIndex + 1}", "${nextRot}°")
+            }
         }
     }
 
@@ -798,6 +1135,7 @@ class PdfWorkspaceViewModel(application: Application) : AndroidViewModel(applica
                 )
                 repository.upsertDocument(updatedDoc)
                 _activeDocument.value = updatedDoc
+                bitmapMemCache.evictAll()
                 renderAllDocumentPages(updatedDoc, _activeSnapshot.value)
                 showDynamicToast(actionLabel, "$newCount pages")
             }
@@ -805,7 +1143,7 @@ class PdfWorkspaceViewModel(application: Application) : AndroidViewModel(applica
     }
 
     // ========================================================================
-    // AI IMAGE & STAMP STUDIO (1K/2K/4K + 8 ASPECT RATIOS)
+    // AI IMAGE & STAMP STUDIO (1K/2K/4K + 8 ASPECT RATIOS + AI SMART STAMPS + PRESETS)
     // ========================================================================
 
     fun setAiStudioSheetVisible(visible: Boolean) {
@@ -821,7 +1159,7 @@ class PdfWorkspaceViewModel(application: Application) : AndroidViewModel(applica
     }
 
     fun setSelectedAiAspectRatio(ratio: AiAspectRatioOption) {
-        _selectedAiAspectRatio.value = ratio
+        _selectedAiAspectRatioFlow.value = ratio
     }
 
     fun setAiPrompt(prompt: String) {
@@ -840,22 +1178,15 @@ class PdfWorkspaceViewModel(application: Application) : AndroidViewModel(applica
                 prompt = promptText,
                 modelOption = _selectedAiModel.value,
                 sizeOption = _selectedAiSize.value,
-                aspectRatioOption = _selectedAiAspectRatio.value
+                aspectRatioOption = _selectedAiAspectRatioFlow.value
             )
             result.fold(
                 onSuccess = { bitmap ->
-                    val savedFile = withContext(Dispatchers.IO) {
-                        val stampsDir = File(getApplication<Application>().filesDir, "stamps").apply { mkdirs() }
-                        val file = File(stampsDir, "ai_stamp_${System.currentTimeMillis()}.png")
-                        FileOutputStream(file).use { out ->
-                            bitmap.compress(Bitmap.CompressFormat.PNG, 96, out)
-                        }
-                        file
-                    }
+                    val savedFile = saveBitmapToStampsDir(bitmap, "ai_img")
                     _aiGenUiState.value = AiGenUiState.Success(bitmap, savedFile.absolutePath)
                     showDynamicToast(
                         "AI Image Ready",
-                        "${_selectedAiSize.value.label} • ${_selectedAiAspectRatio.value.label}"
+                        "${_selectedAiSize.value.label} • ${_selectedAiAspectRatioFlow.value.label}"
                     )
                 },
                 onFailure = { err ->
@@ -865,19 +1196,84 @@ class PdfWorkspaceViewModel(application: Application) : AndroidViewModel(applica
         }
     }
 
+    /**
+     * Generates an AI-designed Architectural / Legal Stamp using `gemini-3.8-flash` Structured JSON
+     * (works without requiring a Blaze billing plan!).
+     */
+    fun generateAiSmartVectorStamp() {
+        val promptText = _aiPrompt.value.trim().ifBlank { "Approved Architectural Review Seal" }
+        viewModelScope.launch {
+            _aiGenUiState.value = AiGenUiState.Loading
+            val result = AiStudioEngine.generateAiSmartStamp(
+                prompt = promptText,
+                authorName = _appSettings.value.defaultAuthorName,
+                sizeOption = _selectedAiSize.value,
+                aspectRatioOption = _selectedAiAspectRatioFlow.value
+            )
+            result.fold(
+                onSuccess = { bitmap ->
+                    val savedFile = saveBitmapToStampsDir(bitmap, "ai_smart_stamp")
+                    _aiGenUiState.value = AiGenUiState.Success(bitmap, savedFile.absolutePath)
+                    showDynamicToast(
+                        "AI Smart Stamp Ready",
+                        "${_selectedAiSize.value.label} • ${_selectedAiAspectRatioFlow.value.label}"
+                    )
+                },
+                onFailure = { err ->
+                    _aiGenUiState.value = AiGenUiState.Error(err.message ?: "AI Smart Stamp failed.")
+                }
+            )
+        }
+    }
+
+    /**
+     * Renders an instant Editorial Stamp Preset (`APPROVED`, `CONFIDENTIAL`, `FINAL ISSUE`, etc.)
+     * and either previews it or stamps it immediately onto the PDF page.
+     */
+    fun generateAndPreviewPresetStamp(preset: EditorialStampPreset, stampImmediately: Boolean = false) {
+        viewModelScope.launch {
+            val bitmap = withContext(Dispatchers.Default) {
+                AiStudioEngine.renderPresetStampBitmap(
+                    preset = preset,
+                    authorName = _appSettings.value.defaultAuthorName,
+                    sizeOption = _selectedAiSize.value,
+                    aspectRatioOption = _selectedAiAspectRatioFlow.value
+                )
+            }
+            val savedFile = saveBitmapToStampsDir(bitmap, "preset_${preset.name.lowercase()}")
+            _aiGenUiState.value = AiGenUiState.Success(bitmap, savedFile.absolutePath)
+            if (stampImmediately) {
+                stampGeneratedAiImageOnCurrentPage()
+            } else {
+                showDynamicToast("${preset.title} Seal Ready", "Tap Stamp on PDF Page")
+            }
+        }
+    }
+
+    private suspend fun saveBitmapToStampsDir(bitmap: Bitmap, prefix: String): File = withContext(Dispatchers.IO) {
+        val stampsDir = File(getApplication<Application>().filesDir, "stamps").apply { mkdirs() }
+        val file = File(stampsDir, "${prefix}_${System.currentTimeMillis()}.png")
+        FileOutputStream(file).use { out ->
+            bitmap.compress(Bitmap.CompressFormat.PNG, 96, out)
+        }
+        file
+    }
+
     fun stampGeneratedAiImageOnCurrentPage() {
         val state = _aiGenUiState.value as? AiGenUiState.Success ?: return
-        val doc = _activeDocument.value
-        if (doc != null) {
+        val bmpRatio = (state.bitmap.width.toFloat() / state.bitmap.height.toFloat().coerceAtLeast(1f))
+            .coerceIn(0.4f, 2.4f)
+        val stampW = 0.42f
+        val stampH = (stampW / bmpRatio).coerceIn(0.14f, 0.48f)
+
+        val currentDoc = _activeDocument.value
+        if (currentDoc != null) {
             val pageIdx = _currentPageIndex.value
-            val ratio = _selectedAiAspectRatio.value.ratioValue
-            val stampW = 0.44f
-            val stampH = (stampW / ratio.coerceAtLeast(0.4f)).coerceIn(0.16f, 0.52f)
             val element = PlacedElement(
                 id = "ai_stamp_${System.nanoTime()}",
                 pageIndex = pageIdx,
                 kind = PlacedElementKind.AI_STAMP,
-                bounds = NormalizedRect(0.28f, 0.36f, stampW, stampH),
+                bounds = NormalizedRect(0.29f, 0.36f, stampW, stampH),
                 textContent = _aiPrompt.value.take(40),
                 imagePath = state.savedPath
             )
@@ -885,9 +1281,36 @@ class PdfWorkspaceViewModel(application: Application) : AndroidViewModel(applica
             pushSnapshotMutation(current.copy(placedElements = current.placedElements + element))
             _showAiStudioSheet.value = false
             _activeProWorkflow.value = null
-            showDynamicToast("AI Stamp placed", "Page ${pageIdx + 1}")
+            showDynamicToast("Stamp placed on Page ${pageIdx + 1}", "Drag to reposition")
         } else {
-            createNewPdfFromAiImage(state.bitmap)
+            // If user opened AI Studio from the Home/Tools screen, stamp onto the most recent PDF and open it!
+            val targetDoc = documents.value.firstOrNull { !it.isPasswordProtected } ?: documents.value.firstOrNull()
+            if (targetDoc != null) {
+                viewModelScope.launch {
+                    val snap = DocumentAnnotationsSnapshot.fromJsonString(targetDoc.annotationsJson)
+                    val pageIdx = targetDoc.currentPage.coerceIn(0, (targetDoc.pageCount - 1).coerceAtLeast(0))
+                    val element = PlacedElement(
+                        id = "ai_stamp_${System.nanoTime()}",
+                        pageIndex = pageIdx,
+                        kind = PlacedElementKind.AI_STAMP,
+                        bounds = NormalizedRect(0.29f, 0.36f, stampW, stampH),
+                        textContent = _aiPrompt.value.take(40),
+                        imagePath = state.savedPath
+                    )
+                    val updatedSnap = snap.copy(placedElements = snap.placedElements + element)
+                    val updatedDoc = targetDoc.copy(
+                        annotationsJson = updatedSnap.toJsonString(),
+                        lastOpenedAt = System.currentTimeMillis()
+                    )
+                    repository.upsertDocument(updatedDoc)
+                    _showAiStudioSheet.value = false
+                    _activeProWorkflow.value = null
+                    openDocumentInternal(updatedDoc)
+                    showDynamicToast("Stamped on ${targetDoc.title.take(16)}", "Page ${pageIdx + 1}")
+                }
+            } else {
+                createNewPdfFromAiImage(state.bitmap)
+            }
         }
     }
 
@@ -913,67 +1336,140 @@ class PdfWorkspaceViewModel(application: Application) : AndroidViewModel(applica
                 repository.upsertDocument(newDoc)
                 _showAiStudioSheet.value = false
                 _activeProWorkflow.value = null
-                openDocument(newDoc)
+                openDocumentInternal(newDoc)
                 showDynamicToast("Created AI Cover PDF", _selectedAiSize.value.label)
             }
         }
     }
 
     // ========================================================================
-    // PRO TOOLBOX HUB WORKFLOWS (MERGE, SPLIT, COMPRESS, WATERMARK, REDACT, OCR, IMPORT)
+    // STUDIO PHOTO & SEAL GALLERY + PHOTO IMPORT / STAMP ENGINE
     // ========================================================================
 
-    fun launchProWorkflow(workflow: ProToolWorkflow?) {
-        if (workflow == ProToolWorkflow.AI_IMAGE_STUDIO) {
-            _showAiStudioSheet.value = true
+    fun stampOrConvertStudioGalleryAsset(asset: StudioGalleryAsset) {
+        val file = File(asset.filePath)
+        if (!file.exists()) {
+            showDynamicToast("Asset file missing")
             return
         }
-        _compressionStats.value = null
-        _ocrUiState.value = OcrUiState.Idle
-        _activeProWorkflow.value = workflow
+        viewModelScope.launch {
+            val bmp = withContext(Dispatchers.IO) {
+                BitmapFactory.decodeFile(file.absolutePath)
+            }
+            if (bmp == null) {
+                showDynamicToast("Unable to decode studio asset")
+                return@launch
+            }
+            val activeDoc = _activeDocument.value
+            if (activeDoc != null) {
+                val ratio = (bmp.width.toFloat() / bmp.height.toFloat().coerceAtLeast(1f)).coerceIn(0.4f, 2.4f)
+                val stampW = 0.44f
+                val stampH = (stampW / ratio).coerceIn(0.14f, 0.48f)
+                val pageIdx = _currentPageIndex.value
+                val element = PlacedElement(
+                    id = "img_stamp_${System.nanoTime()}",
+                    pageIndex = pageIdx,
+                    kind = PlacedElementKind.IMAGE_STAMP,
+                    bounds = NormalizedRect(0.28f, 0.35f, stampW, stampH),
+                    textContent = asset.title,
+                    imagePath = file.absolutePath
+                )
+                val current = _activeSnapshot.value
+                pushSnapshotMutation(current.copy(placedElements = current.placedElements + element))
+                _showPhotoStampPickerSheet.value = false
+                _activeProWorkflow.value = null
+                showDynamicToast("Stamped ${asset.title}", "Drag to reposition")
+            } else {
+                val fileName = "${asset.title.replace(" ", "_")}_${System.currentTimeMillis()}.pdf"
+                val outPdf = PdfProEngine.bitmapsToPdf(getApplication(), listOf(bmp), fileName)
+                if (outPdf != null) {
+                    val doc = PdfDocumentEntity(
+                        id = "doc_plate_${System.nanoTime()}",
+                        title = fileName,
+                        filePath = outPdf.absolutePath,
+                        pageCount = 1,
+                        fileSizeBytes = outPdf.length(),
+                        isStarred = true,
+                        categoryTag = "Scans"
+                    )
+                    repository.upsertDocument(doc)
+                    _showPhotoStampPickerSheet.value = false
+                    _activeProWorkflow.value = null
+                    openDocumentInternal(doc)
+                    showDynamicToast("Created PDF from ${asset.title}")
+                }
+            }
+        }
     }
 
-    fun importExternalDocumentOrImage(context: Context, uri: Uri) {
+    fun importExternalDocumentOrImage(
+        context: Context,
+        uri: Uri,
+        forceTreatAsImage: Boolean = false
+    ) {
         viewModelScope.launch(Dispatchers.IO) {
             try {
                 val contentResolver = context.contentResolver
-                val mime = contentResolver.getType(uri).orEmpty()
+                val mime = contentResolver.getType(uri).orEmpty().lowercase()
+                val uriStr = uri.toString().lowercase()
                 val pdfsDir = File(context.filesDir, "pdfs").apply { mkdirs() }
 
-                if (mime.startsWith("image/")) {
-                    val bmp = contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it) }
-                    if (bmp != null) {
-                        if (_activeDocument.value != null) {
-                            // Stamp image onto active PDF page
-                            val stampsDir = File(context.filesDir, "stamps").apply { mkdirs() }
-                            val imgFile = File(stampsDir, "img_${System.currentTimeMillis()}.png")
-                            FileOutputStream(imgFile).use { bmp.compress(Bitmap.CompressFormat.PNG, 92, it) }
-                            val pageIdx = _currentPageIndex.value
-                            val element = PlacedElement(
-                                id = "img_stamp_${System.nanoTime()}",
-                                pageIndex = pageIdx,
-                                kind = PlacedElementKind.IMAGE_STAMP,
-                                bounds = NormalizedRect(0.25f, 0.35f, 0.45f, 0.30f),
-                                imagePath = imgFile.absolutePath
-                            )
+                // Probe whether the URI stream is an image even if MIME is empty or octet-stream
+                val decodedBitmap = decodeSampledBitmapFromUri(context, uri, maxDimension = 1800)
+                val isImage = forceTreatAsImage ||
+                    mime.startsWith("image/") ||
+                    uriStr.endsWith(".png") ||
+                    uriStr.endsWith(".jpg") ||
+                    uriStr.endsWith(".jpeg") ||
+                    uriStr.endsWith(".webp") ||
+                    decodedBitmap != null
+
+                if (isImage && decodedBitmap != null) {
+                    val stampsDir = File(context.filesDir, "stamps").apply { mkdirs() }
+                    val imgFile = File(stampsDir, "img_${System.currentTimeMillis()}.png")
+                    FileOutputStream(imgFile).use {
+                        decodedBitmap.compress(Bitmap.CompressFormat.PNG, 92, it)
+                    }
+                    val ratio = (decodedBitmap.width.toFloat() / decodedBitmap.height.toFloat().coerceAtLeast(1f))
+                        .coerceIn(0.4f, 2.4f)
+                    val stampW = 0.44f
+                    val stampH = (stampW / ratio).coerceIn(0.14f, 0.48f)
+
+                    if (_activeDocument.value != null) {
+                        val pageIdx = _currentPageIndex.value
+                        val element = PlacedElement(
+                            id = "img_stamp_${System.nanoTime()}",
+                            pageIndex = pageIdx,
+                            kind = PlacedElementKind.IMAGE_STAMP,
+                            bounds = NormalizedRect(0.28f, 0.35f, stampW, stampH),
+                            textContent = "Imported Photo",
+                            imagePath = imgFile.absolutePath
+                        )
+                        withContext(Dispatchers.Main) {
                             val current = _activeSnapshot.value
                             pushSnapshotMutation(current.copy(placedElements = current.placedElements + element))
-                            showDynamicToast("Photo stamped", "Page ${pageIdx + 1}")
-                        } else {
-                            // Convert image into a new standalone PDF
-                            val fileName = "Imported_Image_${System.currentTimeMillis()}.pdf"
-                            val outPdf = PdfProEngine.bitmapsToPdf(context, listOf(bmp), fileName)
-                            if (outPdf != null) {
-                                val doc = PdfDocumentEntity(
-                                    id = "doc_img_${System.nanoTime()}",
-                                    title = fileName,
-                                    filePath = outPdf.absolutePath,
-                                    pageCount = 1,
-                                    fileSizeBytes = outPdf.length(),
-                                    categoryTag = "Scans"
-                                )
-                                repository.upsertDocument(doc)
-                                showDynamicToast("Converted Image to PDF")
+                            _showPhotoStampPickerSheet.value = false
+                            showDynamicToast("Photo stamped on Page ${pageIdx + 1}", "Drag to reposition")
+                        }
+                    } else {
+                        val fileName = "Photo_Plate_${System.currentTimeMillis()}.pdf"
+                        val outPdf = PdfProEngine.bitmapsToPdf(context, listOf(decodedBitmap), fileName)
+                        if (outPdf != null) {
+                            val doc = PdfDocumentEntity(
+                                id = "doc_img_${System.nanoTime()}",
+                                title = fileName,
+                                filePath = outPdf.absolutePath,
+                                pageCount = 1,
+                                fileSizeBytes = outPdf.length(),
+                                isStarred = true,
+                                categoryTag = "Scans"
+                            )
+                            repository.upsertDocument(doc)
+                            withContext(Dispatchers.Main) {
+                                _showPhotoStampPickerSheet.value = false
+                                _activeProWorkflow.value = null
+                                openDocumentInternal(doc)
+                                showDynamicToast("Converted Photo to PDF")
                             }
                         }
                     }
@@ -984,7 +1480,14 @@ class PdfWorkspaceViewModel(application: Application) : AndroidViewModel(applica
                             input.copyTo(output)
                         }
                     }
-                    val count = PdfProEngine.getPageCount(destFile).coerceAtLeast(1)
+                    val count = PdfProEngine.getPageCount(destFile)
+                    if (count <= 0) {
+                        destFile.delete()
+                        withContext(Dispatchers.Main) {
+                            showDynamicToast("Unsupported file format")
+                        }
+                        return@launch
+                    }
                     val doc = PdfDocumentEntity(
                         id = "doc_imp_${System.nanoTime()}",
                         title = "Imported_Document_${count}p.pdf",
@@ -994,10 +1497,67 @@ class PdfWorkspaceViewModel(application: Application) : AndroidViewModel(applica
                         categoryTag = "Imported"
                     )
                     repository.upsertDocument(doc)
-                    showDynamicToast("Imported PDF", "$count pages")
+                    withContext(Dispatchers.Main) {
+                        openDocumentInternal(doc)
+                        showDynamicToast("Imported PDF", "$count pages")
+                    }
                 }
             } catch (e: Exception) {
-                showDynamicToast("Import failed")
+                withContext(Dispatchers.Main) {
+                    showDynamicToast("Import error: ${e.localizedMessage?.take(28) ?: "Failed"}")
+                }
+            }
+        }
+    }
+
+    private fun decodeSampledBitmapFromUri(
+        context: Context,
+        uri: Uri,
+        maxDimension: Int
+    ): Bitmap? {
+        return try {
+            val boundsOpts = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            context.contentResolver.openInputStream(uri)?.use {
+                BitmapFactory.decodeStream(it, null, boundsOpts)
+            }
+            if (boundsOpts.outWidth <= 0 || boundsOpts.outHeight <= 0) return null
+
+            var sampleSize = 1
+            while (boundsOpts.outWidth / sampleSize > maxDimension ||
+                boundsOpts.outHeight / sampleSize > maxDimension
+            ) {
+                sampleSize *= 2
+            }
+            val decodeOpts = BitmapFactory.Options().apply {
+                inSampleSize = sampleSize
+                inPreferredConfig = Bitmap.Config.ARGB_8888
+            }
+            context.contentResolver.openInputStream(uri)?.use {
+                BitmapFactory.decodeStream(it, null, decodeOpts)
+            }
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    // ========================================================================
+    // PRO TOOLBOX HUB WORKFLOWS (MERGE, SPLIT, COMPRESS, WATERMARK, REDACT, OCR, PASSWORD)
+    // ========================================================================
+
+    fun launchProWorkflow(workflow: ProToolWorkflow?) {
+        when (workflow) {
+            ProToolWorkflow.AI_IMAGE_STUDIO -> {
+                _showAiStudioSheet.value = true
+                return
+            }
+            ProToolWorkflow.IMAGES_TO_PDF -> {
+                _showPhotoStampPickerSheet.value = true
+                return
+            }
+            else -> {
+                _compressionStats.value = null
+                _ocrUiState.value = OcrUiState.Idle
+                _activeProWorkflow.value = workflow
             }
         }
     }
@@ -1024,7 +1584,7 @@ class PdfWorkspaceViewModel(application: Application) : AndroidViewModel(applica
                 )
                 repository.upsertDocument(newDoc)
                 _activeProWorkflow.value = null
-                openDocument(newDoc)
+                openDocumentInternal(newDoc)
                 showDynamicToast("Merged ${selectedDocs.size} PDFs", "$count pages")
             }
         }
@@ -1051,7 +1611,7 @@ class PdfWorkspaceViewModel(application: Application) : AndroidViewModel(applica
                 )
                 repository.upsertDocument(newDoc)
                 _activeProWorkflow.value = null
-                openDocument(newDoc)
+                openDocumentInternal(newDoc)
                 showDynamicToast("Extracted $count pages")
             }
         }
@@ -1097,8 +1657,9 @@ class PdfWorkspaceViewModel(application: Application) : AndroidViewModel(applica
                     lastOpenedAt = System.currentTimeMillis()
                 )
                 repository.upsertDocument(updatedDoc)
+                bitmapMemCache.evictAll()
                 _activeProWorkflow.value = null
-                openDocument(updatedDoc)
+                openDocumentInternal(updatedDoc)
                 showDynamicToast("Watermark & Page Numbers applied")
             }
         }
@@ -1124,8 +1685,9 @@ class PdfWorkspaceViewModel(application: Application) : AndroidViewModel(applica
                     lastOpenedAt = System.currentTimeMillis()
                 )
                 repository.upsertDocument(updatedDoc)
+                bitmapMemCache.evictAll()
                 _activeProWorkflow.value = null
-                openDocument(updatedDoc)
+                openDocumentInternal(updatedDoc)
                 showDynamicToast(
                     "Redactions permanently burned",
                     "${result.strippedWordsCount} words stripped"
@@ -1228,10 +1790,6 @@ class PdfWorkspaceViewModel(application: Application) : AndroidViewModel(applica
     fun setReflowMode(enabled: Boolean) {
         _isReflowMode.value = enabled
         if (enabled) showDynamicToast("Reflow Reader Active")
-    }
-    fun setReflowTheme(theme: ReflowTheme) { _reflowTheme.value = theme }
-    fun adjustReflowFontScale(delta: Float) {
-        _reflowFontScale.value = (_reflowFontScale.value + delta).coerceIn(0.75f, 1.85f)
     }
     fun setViewerSearchVisible(visible: Boolean) {
         _isViewerSearchVisible.value = visible

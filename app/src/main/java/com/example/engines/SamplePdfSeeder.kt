@@ -1,6 +1,7 @@
 package com.example.engines
 
 import android.content.Context
+import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
@@ -10,7 +11,10 @@ import android.graphics.pdf.PdfDocument
 import com.example.data.local.GlassPdfRepository
 import com.example.data.local.PdfDocumentEntity
 import com.example.data.local.SavedSignatureEntity
+import com.example.model.AiAspectRatioOption
+import com.example.model.AiImageSizeOption
 import com.example.model.DocumentAnnotationsSnapshot
+import com.example.model.EditorialStampPreset
 import com.example.model.FormFieldType
 import com.example.model.MarkupStyle
 import com.example.model.NormalizedPoint
@@ -18,21 +22,184 @@ import com.example.model.NormalizedRect
 import com.example.model.PdfBookmark
 import com.example.model.PdfFormField
 import com.example.model.PdfTextWord
+import com.example.model.StudioGalleryAsset
 import com.example.model.TextMarkupAnnotation
 import java.io.File
 import java.io.FileOutputStream
 
 /**
  * Generates 3 interactive multi-page sample PDFs on first launch with exact normalized
- * word bounding boxes, structured bookmarks, and fillable AcroForm fields.
+ * word bounding boxes, structured bookmarks, fillable AcroForm fields, and a pre-seeded
+ * Studio Photo & Architectural Plate gallery for 1-tap Photo Stamping and Images-to-PDF.
  */
 object SamplePdfSeeder {
 
     private const val PAGE_WIDTH = 612
     private const val PAGE_HEIGHT = 792
 
-    suspend fun seedIfEmpty(context: Context, repository: GlassPdfRepository) {
-        if (repository.getDocumentCount() > 0) return
+    fun ensureStudioGalleryAssets(context: Context): List<StudioGalleryAsset> {
+        val galleryDir = File(context.filesDir, "studio_gallery").apply { mkdirs() }
+        val assets = mutableListOf<StudioGalleryAsset>()
+
+        // 1. Architectural Pavilion Elevation Plate
+        val plate1File = File(galleryDir, "plate_pavilion_elevation.png")
+        if (!plate1File.exists()) {
+            val bmp = renderArchitecturalPlateBitmap(
+                title = "NORDIC PAVILION • SOUTH ELEVATION",
+                subtitle = "LAMINATED ALABASTER & TRAVERTINE SECTION A-1",
+                accentHex = "#355266",
+                bgHex = "#F4F0E6"
+            )
+            FileOutputStream(plate1File).use { bmp.compress(Bitmap.CompressFormat.PNG, 95, it) }
+            bmp.recycle()
+        }
+        assets.add(
+            StudioGalleryAsset(
+                id = "studio_plate_1",
+                title = "Pavilion South Elevation",
+                subtitle = "Architectural Section Plate (16:10)",
+                filePath = plate1File.absolutePath
+            )
+        )
+
+        // 2. Optical Refraction Blueprint Diagram
+        val plate2File = File(galleryDir, "plate_optical_refraction.png")
+        if (!plate2File.exists()) {
+            val bmp = renderArchitecturalPlateBitmap(
+                title = "OPTICAL REFRACTION MATRIX • ISO-9050",
+                subtitle = "ZENITHAL DAYLIGHT DIFFUSION & ACOUSTIC INTERLAYER",
+                accentHex = "#5C8A6C",
+                bgHex = "#EEF3F0"
+            )
+            FileOutputStream(plate2File).use { bmp.compress(Bitmap.CompressFormat.PNG, 95, it) }
+            bmp.recycle()
+        }
+        assets.add(
+            StudioGalleryAsset(
+                id = "studio_plate_2",
+                title = "Optical Refraction Matrix",
+                subtitle = "Daylight Telemetry Diagram (16:10)",
+                filePath = plate2File.absolutePath
+            )
+        )
+
+        // 3. Official Architectural Approval Seal
+        val sealFile = File(galleryDir, "seal_architectural_approved.png")
+        if (!sealFile.exists()) {
+            val bmp = AiStudioEngine.renderPresetStampBitmap(
+                preset = EditorialStampPreset.APPROVED,
+                authorName = "Elena Rostova",
+                sizeOption = AiImageSizeOption.SIZE_1K,
+                aspectRatioOption = AiAspectRatioOption.RATIO_3_2
+            )
+            FileOutputStream(sealFile).use { bmp.compress(Bitmap.CompressFormat.PNG, 95, it) }
+            bmp.recycle()
+        }
+        assets.add(
+            StudioGalleryAsset(
+                id = "studio_seal_approved",
+                title = "Approved Review Seal",
+                subtitle = "Official Architectural Stamp (3:2)",
+                filePath = sealFile.absolutePath
+            )
+        )
+
+        // 4. Verified Production Record Seal
+        val verifiedFile = File(galleryDir, "seal_verified_record.png")
+        if (!verifiedFile.exists()) {
+            val bmp = AiStudioEngine.renderPresetStampBitmap(
+                preset = EditorialStampPreset.VERIFIED,
+                authorName = "Zurich Materials Lab",
+                sizeOption = AiImageSizeOption.SIZE_1K,
+                aspectRatioOption = AiAspectRatioOption.RATIO_1_1
+            )
+            FileOutputStream(verifiedFile).use { bmp.compress(Bitmap.CompressFormat.PNG, 95, it) }
+            bmp.recycle()
+        }
+        assets.add(
+            StudioGalleryAsset(
+                id = "studio_seal_verified",
+                title = "Verified Circular Seal",
+                subtitle = "Authenticated Emblem (1:1)",
+                filePath = verifiedFile.absolutePath
+            )
+        )
+
+        return assets
+    }
+
+    private fun renderArchitecturalPlateBitmap(
+        title: String,
+        subtitle: String,
+        accentHex: String,
+        bgHex: String
+    ): Bitmap {
+        val w = 960
+        val h = 600
+        val bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(bmp)
+        val accent = Color.parseColor(accentHex)
+
+        canvas.drawColor(Color.parseColor(bgHex))
+
+        val borderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = accent
+            style = Paint.Style.STROKE
+            strokeWidth = 5f
+        }
+        canvas.drawRoundRect(RectF(24f, 24f, w - 24f, h - 24f), 18f, 18f, borderPaint)
+
+        val gridPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = accent
+            alpha = 38
+            strokeWidth = 1.5f
+        }
+        var gx = 80f
+        while (gx < w - 60f) {
+            canvas.drawLine(gx, 70f, gx, h - 120f, gridPaint)
+            gx += 80f
+        }
+        var gy = 100f
+        while (gy < h - 120f) {
+            canvas.drawLine(60f, gy, w - 60f, gy, gridPaint)
+            gy += 70f
+        }
+
+        // Architectural geometry
+        val geoPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = accent
+            style = Paint.Style.STROKE
+            strokeWidth = 3.5f
+        }
+        val goldFill = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.parseColor("#C89D54")
+            alpha = 165
+            style = Paint.Style.FILL
+        }
+        canvas.drawRoundRect(RectF(160f, 150f, 800f, 380f), 12f, 12f, geoPaint)
+        canvas.drawCircle(340f, 265f, 82f, geoPaint)
+        canvas.drawCircle(480f, 265f, 82f, geoPaint)
+        canvas.drawCircle(620f, 265f, 82f, geoPaint)
+        canvas.drawRect(435f, 220f, 525f, 310f, goldFill)
+
+        val titlePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.parseColor("#1C1E21")
+            textSize = 26f
+            typeface = Typeface.create(Typeface.SERIF, Typeface.BOLD)
+        }
+        val subPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = accent
+            textSize = 16f
+            typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
+        }
+        canvas.drawText(title, 56f, h - 72f, titlePaint)
+        canvas.drawText(subtitle, 56f, h - 44f, subPaint)
+        return bmp
+    }
+
+    suspend fun seedIfEmpty(context: Context, repository: GlassPdfRepository, forceReseed: Boolean = false) {
+        ensureStudioGalleryAssets(context)
+        if (!forceReseed && repository.getDocumentCount() > 0) return
 
         val docsDir = File(context.filesDir, "pdfs").apply { mkdirs() }
 

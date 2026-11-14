@@ -18,8 +18,13 @@ private const val TOKEN_CACHE_STORE_PREFIX = "com.google.firebase.appcheck.store
 private const val DEBUG_SECRET_KEY = "com.google.firebase.appcheck.debug.DEBUG_SECRET"
 private const val RECAPTCHA_SITE_KEY_RES = "recaptcha_site_key"
 
+@Volatile
+private var cachedAppContext: Context? = null
+
 fun configureAppCheck(context: Context, intent: Intent?) {
     try {
+        cachedAppContext = context.applicationContext
+
         // 1. Ensure FirebaseApp is initialized
         if (FirebaseApp.getApps(context).isEmpty()) {
             FirebaseApp.initializeApp(context)
@@ -43,7 +48,6 @@ fun configureAppCheck(context: Context, intent: Intent?) {
 
             if (!debugToken.isNullOrEmpty()) {
                 val previousSecret = debugPrefs.getString(DEBUG_SECRET_KEY, null)
-                // Clear any stale cached App Check token so a previously invalid token is not reused
                 if (previousSecret != debugToken) {
                     tokenCachePrefs.edit().clear().commit()
                 }
@@ -63,31 +67,49 @@ fun configureAppCheck(context: Context, intent: Intent?) {
             Log.d(TAG, "DebugAppCheckProviderFactory installed.")
 
             if (!debugToken.isNullOrEmpty()) {
-                // Force an immediate fresh token exchange when a debug token is supplied
                 FirebaseAppCheck.getInstance().getAppCheckToken(true)
             }
         } else {
             // 3. Release: Look up recaptcha_site_key safely without throwing Resources.NotFoundException
-            val resId = context.resources.getIdentifier(
-                RECAPTCHA_SITE_KEY_RES,
-                "string",
-                context.packageName
-            )
-            if (resId != 0) {
-                val siteKey = context.getString(resId)
-                if (siteKey.isNotBlank()) {
-                    FirebaseAppCheck.getInstance().installAppCheckProviderFactory(
-                        RecaptchaAppCheckProviderFactory.getInstance(siteKey)
-                    )
-                    Log.d(TAG, "RecaptchaAppCheckProviderFactory installed.")
-                } else {
-                    Log.e(TAG, "recaptcha_site_key resource string is blank.")
-                }
-            } else {
-                Log.e(TAG, "recaptcha_site_key string resource not found in package.")
-            }
+            installRecaptchaProviderIfAvailable(context)
         }
     } catch (e: Exception) {
         Log.e(TAG, "Failed to initialize Firebase App Check", e)
+    }
+}
+
+fun installRecaptchaProviderIfAvailable(context: Context? = cachedAppContext): Boolean {
+    val ctx = context ?: return false
+    return try {
+        val resId = ctx.resources.getIdentifier(
+            RECAPTCHA_SITE_KEY_RES,
+            "string",
+            ctx.packageName
+        )
+        if (resId != 0) {
+            val siteKey = ctx.getString(resId)
+            if (siteKey.isNotBlank()) {
+                val persistenceKey = FirebaseApp.getInstance().persistenceKey
+                ctx.getSharedPreferences(
+                    "$TOKEN_CACHE_STORE_PREFIX$persistenceKey",
+                    Context.MODE_PRIVATE
+                ).edit().clear().commit()
+
+                FirebaseAppCheck.getInstance().installAppCheckProviderFactory(
+                    RecaptchaAppCheckProviderFactory.getInstance(siteKey)
+                )
+                Log.d(TAG, "RecaptchaAppCheckProviderFactory installed.")
+                true
+            } else {
+                Log.e(TAG, "recaptcha_site_key resource string is blank.")
+                false
+            }
+        } else {
+            Log.e(TAG, "recaptcha_site_key string resource not found in package.")
+            false
+        }
+    } catch (e: Exception) {
+        Log.e(TAG, "Failed to install RecaptchaAppCheckProviderFactory", e)
+        false
     }
 }

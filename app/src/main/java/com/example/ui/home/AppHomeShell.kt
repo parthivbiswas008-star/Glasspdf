@@ -34,6 +34,7 @@ import androidx.compose.material.icons.automirrored.filled.CallSplit
 import androidx.compose.material.icons.automirrored.filled.MergeType
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.AutoAwesome
+import androidx.compose.material.icons.filled.Bolt
 import androidx.compose.material.icons.filled.BrandingWatermark
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Compress
@@ -44,21 +45,28 @@ import androidx.compose.material.icons.filled.Draw
 import androidx.compose.material.icons.filled.FolderZip
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Image
+import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.MoreHoriz
 import androidx.compose.material.icons.filled.Palette
 import androidx.compose.material.icons.filled.PhotoLibrary
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Security
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Share
+import androidx.compose.material.icons.filled.Speed
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.filled.StarBorder
+import androidx.compose.material.icons.filled.Swipe
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Slider
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -84,10 +92,14 @@ import com.example.R
 import com.example.data.local.PdfDocumentEntity
 import com.example.data.local.SavedSignatureEntity
 import com.example.engines.PdfProEngine
+import com.example.model.AppSettings
 import com.example.model.DocumentAnnotationsSnapshot
 import com.example.model.HomeTab
+import com.example.model.PageScrollDirection
+import com.example.model.PdfCanvasPaperTint
 import com.example.model.ProToolWorkflow
 import com.example.model.ReflowTheme
+import com.example.model.RenderQualityMode
 import com.example.ui.components.GlassIconBadge
 import com.example.ui.components.GlassPill
 import com.example.ui.components.GlassSurface
@@ -119,6 +131,7 @@ fun AppHomeShell(
     val searchQuery by viewModel.searchQuery.collectAsStateWithLifecycle()
     val onlyStarred by viewModel.onlyStarredFilter.collectAsStateWithLifecycle()
     val selectedCategory by viewModel.selectedCategoryFilter.collectAsStateWithLifecycle()
+    val appSettings by viewModel.appSettings.collectAsStateWithLifecycle()
     val themeMode by viewModel.themeMode.collectAsStateWithLifecycle()
     val reflowTheme by viewModel.reflowTheme.collectAsStateWithLifecycle()
     val savedSignatures by viewModel.savedSignatures.collectAsStateWithLifecycle()
@@ -155,8 +168,9 @@ fun AppHomeShell(
                 when (tab) {
                     HomeTab.RECENT -> RecentDocumentsTab(
                         documents = documents,
-                        onOpenDocument = { viewModel.openDocument(it) },
+                        onOpenDocument = { viewModel.requestOpenDocument(it) },
                         onToggleStar = { viewModel.toggleDocumentStar(it) },
+                        onManagePassword = { viewModel.openPasswordManageModal(it) },
                         onDelete = { viewModel.deleteDocument(it) },
                         onShare = { doc ->
                             PdfProEngine.shareFile(context, File(doc.filePath))
@@ -173,31 +187,40 @@ fun AppHomeShell(
                         onToggleStarredFilter = { viewModel.toggleStarredFilter() },
                         selectedCategory = selectedCategory,
                         onSelectCategory = { viewModel.setCategoryFilter(it) },
-                        onOpenDocument = { viewModel.openDocument(it) },
+                        onOpenDocument = { viewModel.requestOpenDocument(it) },
                         onToggleStar = { viewModel.toggleDocumentStar(it) },
+                        onManagePassword = { viewModel.openPasswordManageModal(it) },
                         onDelete = { viewModel.deleteDocument(it) },
                         onImportPdf = onLaunchFilePicker,
-                        onImportPhoto = onLaunchPhotoPicker
+                        onImportPhoto = { viewModel.setPhotoStampPickerSheetVisible(true) }
                     )
 
                     HomeTab.TOOLS -> ProToolboxHubTab(
                         onSelectWorkflow = { workflow ->
-                            if (workflow == ProToolWorkflow.IMAGES_TO_PDF) {
-                                onLaunchPhotoPicker()
-                            } else {
-                                viewModel.launchProWorkflow(workflow)
-                            }
+                            viewModel.launchProWorkflow(workflow)
                         }
                     )
 
                     HomeTab.SETTINGS -> SettingsVaultTab(
+                        appSettings = appSettings,
                         themeMode = themeMode,
                         onSelectThemeMode = { viewModel.setThemeMode(it) },
+                        onSelectScrollDirection = { viewModel.setPageScrollDirection(it) },
+                        onSelectPaperTint = { viewModel.setPdfCanvasPaperTint(it) },
+                        onSelectRenderQuality = { viewModel.setRenderQualityMode(it) },
+                        onToggleInstantHighlight = { viewModel.setInstantHighlightOnDrag(it) },
+                        onToggleAutoCopy = { viewModel.setAutoCopyHighlightedText(it) },
+                        onToggleKeepScreenAwake = { viewModel.setKeepScreenAwake(it) },
+                        onToggleFastScrollScrubber = { viewModel.setShowFastScrollScrubber(it) },
+                        onToggleRememberLastPage = { viewModel.setRememberLastPage(it) },
+                        onDefaultAuthorChange = { viewModel.setDefaultAuthorName(it) },
+                        onDefaultOpacityChange = { viewModel.setActiveOpacity(it) },
                         reflowTheme = reflowTheme,
                         onSelectReflowTheme = { viewModel.setReflowTheme(it) },
                         savedSignatures = savedSignatures,
                         onOpenSignaturePad = { viewModel.setSignatureModalVisible(true) },
                         onDeleteSignature = { viewModel.deleteSavedSignature(it) },
+                        onRestoreSampleWorkspace = { viewModel.reseedSampleWorkspace() },
                         documentsCount = documents.size,
                         totalBytes = documents.sumOf { it.fileSizeBytes }
                     )
@@ -324,6 +347,7 @@ private fun RecentDocumentsTab(
     documents: List<PdfDocumentEntity>,
     onOpenDocument: (PdfDocumentEntity) -> Unit,
     onToggleStar: (PdfDocumentEntity) -> Unit,
+    onManagePassword: (PdfDocumentEntity) -> Unit,
     onDelete: (PdfDocumentEntity) -> Unit,
     onShare: (PdfDocumentEntity) -> Unit,
     onLaunchAiStudio: () -> Unit,
@@ -398,7 +422,7 @@ private fun RecentDocumentsTab(
                                 color = Color(0xFFF5F3EE)
                             )
                             Text(
-                                text = "Synthesize 1K, 2K & 4K stamps across 8 aspect ratios",
+                                text = "Official Seals, AI Smart Stamps & 1K/2K/4K Images",
                                 style = MaterialTheme.typography.bodyMedium,
                                 color = Color(0xFFD0CEC7)
                             )
@@ -416,6 +440,14 @@ private fun RecentDocumentsTab(
                     .horizontalScroll(rememberScrollState()),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
+                GlassPill(
+                    onClick = { onLaunchWorkflow(ProToolWorkflow.PASSWORD_PROTECT) },
+                    modifier = Modifier.testTag("quick_password_pill")
+                ) {
+                    Icon(Icons.Default.Lock, null, tint = glass.goldBadge, modifier = Modifier.size(17.dp))
+                    Spacer(Modifier.width(6.dp))
+                    Text("Password Lock", style = MaterialTheme.typography.labelLarge, color = glass.primaryText)
+                }
                 GlassPill(
                     onClick = { onLaunchWorkflow(ProToolWorkflow.MERGE_PDFS) },
                     modifier = Modifier.testTag("quick_merge_pill")
@@ -476,6 +508,7 @@ private fun RecentDocumentsTab(
                 doc = doc,
                 onOpen = { onOpenDocument(doc) },
                 onToggleStar = { onToggleStar(doc) },
+                onManagePassword = { onManagePassword(doc) },
                 onShare = { onShare(doc) },
                 onDelete = { onDelete(doc) }
             )
@@ -494,6 +527,7 @@ private fun FilesBrowserTab(
     onSelectCategory: (String) -> Unit,
     onOpenDocument: (PdfDocumentEntity) -> Unit,
     onToggleStar: (PdfDocumentEntity) -> Unit,
+    onManagePassword: (PdfDocumentEntity) -> Unit,
     onDelete: (PdfDocumentEntity) -> Unit,
     onImportPdf: () -> Unit,
     onImportPhoto: () -> Unit
@@ -653,6 +687,7 @@ private fun FilesBrowserTab(
                 doc = doc,
                 onOpen = { onOpenDocument(doc) },
                 onToggleStar = { onToggleStar(doc) },
+                onManagePassword = { onManagePassword(doc) },
                 onShare = { PdfProEngine.shareFile(context, File(doc.filePath)) },
                 onDelete = { onDelete(doc) }
             )
@@ -665,6 +700,7 @@ private fun LiquidGlassDocumentCard(
     doc: PdfDocumentEntity,
     onOpen: () -> Unit,
     onToggleStar: () -> Unit,
+    onManagePassword: () -> Unit,
     onShare: () -> Unit,
     onDelete: () -> Unit
 ) {
@@ -731,11 +767,11 @@ private fun LiquidGlassDocumentCard(
                     modifier = Modifier
                         .align(Alignment.BottomEnd)
                         .clip(RoundedCornerShape(6.dp))
-                        .background(Color(0xFF355266))
+                        .background(if (doc.isPasswordProtected) Color(0xFF8C6B32) else Color(0xFF355266))
                         .padding(horizontal = 5.dp, vertical = 1.5.dp)
                 ) {
                     Text(
-                        text = "PDF",
+                        text = if (doc.isPasswordProtected) "LOCK" else "PDF",
                         fontFamily = JetBrainsTabularFamily,
                         style = MaterialTheme.typography.labelSmall,
                         color = Color.White
@@ -746,13 +782,26 @@ private fun LiquidGlassDocumentCard(
             Spacer(modifier = Modifier.width(14.dp))
 
             Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = doc.title.removeSuffix(".pdf"),
-                    style = MaterialTheme.typography.titleMedium,
-                    color = glass.primaryText,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    if (doc.isPasswordProtected) {
+                        Icon(
+                            imageVector = Icons.Default.Lock,
+                            contentDescription = "Locked",
+                            tint = glass.goldBadge,
+                            modifier = Modifier.size(15.dp)
+                        )
+                    }
+                    Text(
+                        text = doc.title.removeSuffix(".pdf"),
+                        style = MaterialTheme.typography.titleMedium,
+                        color = glass.primaryText,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
                 Spacer(modifier = Modifier.height(6.dp))
 
                 // Frosted Progress Pill & Metadata Row
@@ -826,6 +875,16 @@ private fun LiquidGlassDocumentCard(
                         }
                     )
                     DropdownMenuItem(
+                        text = {
+                            Text(if (doc.isPasswordProtected) "Manage / Remove Password Lock" else "Password Lock PDF")
+                        },
+                        leadingIcon = { Icon(Icons.Default.Lock, null) },
+                        onClick = {
+                            menuExpanded = false
+                            onManagePassword()
+                        }
+                    )
+                    DropdownMenuItem(
                         text = { Text("Share PDF") },
                         leadingIcon = { Icon(Icons.Default.Share, null) },
                         onClick = {
@@ -869,7 +928,7 @@ private fun ProToolboxHubTab(
                 color = glass.primaryText
             )
             Text(
-                text = "All structural PDF engines, AI stamps, and vector redactions unlocked offline.",
+                text = "All structural PDF engines, AI stamps, password locks, and vector redactions unlocked.",
                 style = MaterialTheme.typography.bodyMedium,
                 color = glass.secondaryText
             )
@@ -912,6 +971,7 @@ private fun ProWorkflowGlassCard(
         ProToolWorkflow.OCR_SCANNER -> Icons.Default.DocumentScanner to ToolGradientOcr
         ProToolWorkflow.WATERMARK_NUMBERS -> Icons.Default.BrandingWatermark to ToolGradientWatermark
         ProToolWorkflow.REDACT_INFO -> Icons.Default.Security to ToolGradientRedact
+        ProToolWorkflow.PASSWORD_PROTECT -> Icons.Default.Lock to ToolGradientWatermark
     }
 
     GlassSurface(
@@ -973,13 +1033,25 @@ private fun ProWorkflowGlassCard(
 
 @Composable
 private fun SettingsVaultTab(
+    appSettings: AppSettings,
     themeMode: GlassThemeMode,
     onSelectThemeMode: (GlassThemeMode) -> Unit,
+    onSelectScrollDirection: (PageScrollDirection) -> Unit,
+    onSelectPaperTint: (PdfCanvasPaperTint) -> Unit,
+    onSelectRenderQuality: (RenderQualityMode) -> Unit,
+    onToggleInstantHighlight: (Boolean) -> Unit,
+    onToggleAutoCopy: (Boolean) -> Unit,
+    onToggleKeepScreenAwake: (Boolean) -> Unit,
+    onToggleFastScrollScrubber: (Boolean) -> Unit,
+    onToggleRememberLastPage: (Boolean) -> Unit,
+    onDefaultAuthorChange: (String) -> Unit,
+    onDefaultOpacityChange: (Float) -> Unit,
     reflowTheme: ReflowTheme,
     onSelectReflowTheme: (ReflowTheme) -> Unit,
     savedSignatures: List<SavedSignatureEntity>,
     onOpenSignaturePad: () -> Unit,
     onDeleteSignature: (String) -> Unit,
+    onRestoreSampleWorkspace: () -> Unit,
     documentsCount: Int,
     totalBytes: Long
 ) {
@@ -992,7 +1064,7 @@ private fun SettingsVaultTab(
         contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 6.dp, bottom = 140.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
-        // 1. Optical Glass Theme Switcher
+        // 1. Optical Glass Theme Switcher (Persisted)
         item {
             GlassSurface(
                 modifier = Modifier.fillMaxWidth(),
@@ -1016,7 +1088,7 @@ private fun SettingsVaultTab(
                                 color = glass.primaryText
                             )
                             Text(
-                                text = "Non-neon Frosted Alabaster & Warm Obsidian Slate",
+                                text = "Saved automatically across restarts",
                                 style = MaterialTheme.typography.bodyMedium,
                                 color = glass.secondaryText
                             )
@@ -1047,7 +1119,231 @@ private fun SettingsVaultTab(
             }
         }
 
-        // 2. Default Reflow Reader Mode Theme
+        // 2. Page Scroll Direction & PDF Paper Tint (Persisted)
+        item {
+            GlassSurface(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(26.dp)
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(18.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        Icon(Icons.Default.Swipe, null, tint = glass.accent)
+                        Column {
+                            Text(
+                                text = "Page Navigation & Paper Tint",
+                                style = MaterialTheme.typography.titleMedium,
+                                color = glass.primaryText
+                            )
+                            Text(
+                                text = "Choose continuous vertical scroll or horizontal book flip",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = glass.secondaryText
+                            )
+                        }
+                    }
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        PageScrollDirection.entries.forEach { dir ->
+                            GlassPill(
+                                onClick = { onSelectScrollDirection(dir) },
+                                isSelected = appSettings.scrollDirection == dir,
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .testTag("setting_scroll_${dir.name}")
+                            ) {
+                                Text(dir.label, style = MaterialTheme.typography.labelLarge, color = glass.primaryText)
+                            }
+                        }
+                    }
+
+                    Text("PDF Canvas Paper Tint", style = MaterialTheme.typography.labelLarge, color = glass.primaryText)
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        PdfCanvasPaperTint.entries.forEach { tint ->
+                            GlassPill(
+                                onClick = { onSelectPaperTint(tint) },
+                                isSelected = appSettings.paperTint == tint,
+                                modifier = Modifier.testTag("setting_tint_${tint.name}")
+                            ) {
+                                Text(tint.label, style = MaterialTheme.typography.labelLarge, color = glass.primaryText)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // 3. Render Engine Quality & Performance (Persisted)
+        item {
+            GlassSurface(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(26.dp)
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(18.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        Icon(Icons.Default.Speed, null, tint = glass.accent)
+                        Column {
+                            Text(
+                                text = "PDF Render Engine & Frame Pacing",
+                                style = MaterialTheme.typography.titleMedium,
+                                color = glass.primaryText
+                            )
+                            Text(
+                                text = "LRU bitmap cache + zero-recomposition scroll engine",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = glass.secondaryText
+                            )
+                        }
+                    }
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        RenderQualityMode.entries.forEach { q ->
+                            GlassPill(
+                                onClick = { onSelectRenderQuality(q) },
+                                isSelected = appSettings.renderQuality == q,
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .testTag("setting_quality_${q.name}")
+                            ) {
+                                Text(q.label, style = MaterialTheme.typography.labelSmall, color = glass.primaryText)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // 4. Smart Highlight, Selection & Reading Preferences (Persisted)
+        item {
+            GlassSurface(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(26.dp)
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(18.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        Icon(Icons.Default.Bolt, null, tint = glass.goldBadge)
+                        Column {
+                            Text(
+                                text = "Highlight & Reading Behavior",
+                                style = MaterialTheme.typography.titleMedium,
+                                color = glass.primaryText
+                            )
+                            Text(
+                                text = "Customize text selection, instant highlight, and display",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = glass.secondaryText
+                            )
+                        }
+                    }
+
+                    SettingToggleRow(
+                        title = "Instant Highlight on Drag",
+                        subtitle = "Immediately apply highlight when finger lifts in Annotate mode",
+                        checked = appSettings.instantHighlightOnDrag,
+                        onCheckedChange = onToggleInstantHighlight,
+                        tag = "toggle_instant_highlight_setting"
+                    )
+
+                    SettingToggleRow(
+                        title = "Auto-Copy Highlighted Text",
+                        subtitle = "Automatically copy highlighted passages to system clipboard",
+                        checked = appSettings.autoCopyHighlightedText,
+                        onCheckedChange = onToggleAutoCopy,
+                        tag = "toggle_auto_copy_setting"
+                    )
+
+                    SettingToggleRow(
+                        title = "Keep Screen Awake While Reading",
+                        subtitle = "Prevent screen dimming while reviewing architectural plans",
+                        checked = appSettings.keepScreenAwake,
+                        onCheckedChange = onToggleKeepScreenAwake,
+                        tag = "toggle_keep_awake_setting"
+                    )
+
+                    SettingToggleRow(
+                        title = "Show Right-Edge Fast Scroll Scrubber",
+                        subtitle = "Display quick page jump scrubber along the right margin",
+                        checked = appSettings.showFastScrollScrubber,
+                        onCheckedChange = onToggleFastScrollScrubber,
+                        tag = "toggle_scrubber_setting"
+                    )
+
+                    SettingToggleRow(
+                        title = "Remember Last Page Position",
+                        subtitle = "Resume documents at the exact page you left off",
+                        checked = appSettings.rememberLastPage,
+                        onCheckedChange = onToggleRememberLastPage,
+                        tag = "toggle_remember_page_setting"
+                    )
+
+                    Column {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Text("Default Highlight Opacity", style = MaterialTheme.typography.labelLarge, color = glass.primaryText)
+                            Text(
+                                text = "${(appSettings.defaultHighlightOpacity * 100).toInt()}%",
+                                fontFamily = JetBrainsTabularFamily,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = glass.accent
+                            )
+                        }
+                        Slider(
+                            value = appSettings.defaultHighlightOpacity,
+                            onValueChange = onDefaultOpacityChange,
+                            valueRange = 0.20f..0.75f
+                        )
+                    }
+
+                    OutlinedTextField(
+                        value = appSettings.defaultAuthorName,
+                        onValueChange = onDefaultAuthorChange,
+                        label = { Text("Default Author / Signatory Name") },
+                        singleLine = true,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("setting_author_name_input")
+                    )
+                }
+            }
+        }
+
+        // 5. Default Reflow Reader Mode Theme
         item {
             GlassSurface(
                 modifier = Modifier.fillMaxWidth(),
@@ -1086,7 +1382,7 @@ private fun SettingsVaultTab(
             }
         }
 
-        // 3. Saved Signatures Vault
+        // 6. Saved Signatures Vault
         item {
             GlassSurface(
                 modifier = Modifier.fillMaxWidth(),
@@ -1164,40 +1460,89 @@ private fun SettingsVaultTab(
             }
         }
 
-        // 4. Local Offline Vault Storage Summary
+        // 7. Local Offline Vault Storage Summary & Restore Sample PDFs
         item {
             GlassSurface(
                 modifier = Modifier.fillMaxWidth(),
                 shape = RoundedCornerShape(26.dp)
             ) {
-                Row(
+                Column(
                     modifier = Modifier
                         .fillMaxWidth()
                         .padding(18.dp),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
-                    Column {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column {
+                            Text(
+                                text = "Offline Document Vault",
+                                style = MaterialTheme.typography.titleMedium,
+                                color = glass.primaryText
+                            )
+                            Text(
+                                text = "$documentsCount indexed PDFs • Zero cloud lock-in",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = glass.secondaryText
+                            )
+                        }
                         Text(
-                            text = "Offline Document Vault",
+                            text = "${(totalBytes / 1024L).coerceAtLeast(48L)} KB",
+                            fontFamily = JetBrainsTabularFamily,
                             style = MaterialTheme.typography.titleMedium,
-                            color = glass.primaryText
-                        )
-                        Text(
-                            text = "$documentsCount indexed PDFs • Zero cloud lock-in",
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = glass.secondaryText
+                            color = glass.accent
                         )
                     }
-                    Text(
-                        text = "${(totalBytes / 1024L).coerceAtLeast(48L)} KB",
-                        fontFamily = JetBrainsTabularFamily,
-                        style = MaterialTheme.typography.titleMedium,
-                        color = glass.accent
-                    )
+
+                    GlassPill(
+                        onClick = onRestoreSampleWorkspace,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("restore_sample_workspace_button")
+                    ) {
+                        Icon(Icons.Default.Refresh, null, tint = glass.accent, modifier = Modifier.size(17.dp))
+                        Spacer(Modifier.width(8.dp))
+                        Text(
+                            text = "Restore Sample PDFs & Studio Plates",
+                            style = MaterialTheme.typography.labelLarge,
+                            color = glass.primaryText
+                        )
+                    }
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun SettingToggleRow(
+    title: String,
+    subtitle: String,
+    checked: Boolean,
+    onCheckedChange: (Boolean) -> Unit,
+    tag: String
+) {
+    val glass = LocalLiquidGlass.current
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable { onCheckedChange(!checked) }
+            .padding(vertical = 4.dp),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Column(modifier = Modifier.weight(1f).padding(end = 12.dp)) {
+            Text(title, style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.Medium, color = glass.primaryText)
+            Text(subtitle, style = MaterialTheme.typography.bodySmall, color = glass.secondaryText)
+        }
+        Switch(
+            checked = checked,
+            onCheckedChange = onCheckedChange,
+            modifier = Modifier.testTag(tag)
+        )
     }
 }
 

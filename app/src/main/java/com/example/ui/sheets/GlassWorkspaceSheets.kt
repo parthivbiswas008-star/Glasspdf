@@ -1,5 +1,6 @@
 package com.example.ui.sheets
 
+import android.graphics.BitmapFactory
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -32,10 +33,15 @@ import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Bookmark
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.DeleteOutline
+import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.FolderZip
 import androidx.compose.material.icons.filled.IosShare
+import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.filled.LockOpen
+import androidx.compose.material.icons.filled.PhotoLibrary
 import androidx.compose.material.icons.filled.PictureAsPdf
 import androidx.compose.material.icons.filled.Print
+import androidx.compose.material.icons.filled.Verified
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -64,6 +70,7 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -72,9 +79,10 @@ import com.example.model.AiAspectRatioOption
 import com.example.model.AiImageModelOption
 import com.example.model.AiImageSizeOption
 import com.example.model.DocumentAnnotationsSnapshot
+import com.example.model.EditorialStampPreset
 import com.example.model.NormalizedPoint
 import com.example.model.ProToolWorkflow
-import com.example.model.TextMarkupAnnotation
+import com.example.model.StudioGalleryAsset
 import com.example.ui.components.GlassPill
 import com.example.ui.components.GlassSheet
 import com.example.ui.theme.EditorialHighlightSwatches
@@ -330,7 +338,7 @@ fun NavigatorGlassSheet(
                 2 -> {
                     if (snapshot.markups.isEmpty()) {
                         Text(
-                            text = "No highlights or notes yet. Drag across text on any page to highlight.",
+                            text = "No highlights or notes yet. Long-press a word or drag in Annotate mode to highlight.",
                             style = MaterialTheme.typography.bodyMedium,
                             color = glass.secondaryText,
                             modifier = Modifier.padding(vertical = 16.dp)
@@ -400,12 +408,13 @@ fun NavigatorGlassSheet(
 @Composable
 fun SignaturePadModal(
     visible: Boolean,
+    defaultAuthorName: String = "Elena Rostova",
     onSaveAndStamp: (label: String, isTyped: Boolean, typedText: String, fontId: String, colorHex: String, points: List<NormalizedPoint>) -> Unit,
     onDismiss: () -> Unit
 ) {
     val glass = LocalLiquidGlass.current
     var isTypedMode by remember { mutableStateOf(false) }
-    var typedName by remember { mutableStateOf("Elena Rostova") }
+    var typedName by remember(defaultAuthorName) { mutableStateOf(defaultAuthorName.ifBlank { "Elena Rostova" }) }
     var selectedFontId by remember { mutableStateOf(SignatureFontOptions.first().id) }
     var selectedColorHex by remember { mutableStateOf("#1C1E21") }
     val drawnPoints = remember { mutableStateListOf<NormalizedPoint>() }
@@ -587,11 +596,10 @@ fun SignaturePadModal(
 }
 
 /**
- * 4. AI Image & Stamp Studio Sheet (`gemini-nano-banana-2.1` & `gemini-3-pro-image`):
- * Provides explicit user controls for:
- * - Image Size: 1K, 2K, and 4K
- * - Aspect Ratio: 1:1, 2:3, 3:2, 3:4, 4:3, 9:16, 16:9, and 21:9
- * - Model: Nano Banana 2.1 (Fast) or Gemini 3 Pro Image (Studio Quality)
+ * 4. AI Image & Stamp Studio Sheet:
+ * - Instant 1-Tap Official Editorial Seals (`APPROVED`, `CONFIDENTIAL`, `FINAL ISSUE`, `STUDIO DRAFT`, `EXECUTED`, `VERIFIED`)
+ * - AI Smart Vector Stamp (`gemini-3.8-flash` structured JSON synthesis — works on all Firebase tiers)
+ * - AI Raster Image Synthesis (`gemini-3.1-flash-image-preview` & `gemini-3-pro-image-preview` with 1K/2K/4K & 8 aspect ratios)
  */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
@@ -606,34 +614,68 @@ fun AiImageStudioSheet(
     val selectedRatio by viewModel.selectedAiAspectRatio.collectAsStateWithLifecycle()
     val prompt by viewModel.aiPrompt.collectAsStateWithLifecycle()
     val uiState by viewModel.aiGenUiState.collectAsStateWithLifecycle()
-    val activeDoc by viewModel.activeDocument.collectAsStateWithLifecycle()
 
     GlassSheet(
         visible = visible,
         title = "AI Image & Stamp Studio",
-        subtitle = "Generate 1K, 2K & 4K stamps across 8 aspect ratios",
+        subtitle = "Official Seals, AI Smart Stamps & 1K/2K/4K Image Synthesis",
         onDismiss = onDismiss
     ) {
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .heightIn(max = 520.dp)
+                .heightIn(max = 550.dp)
                 .verticalScroll(rememberScrollState()),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            // Model Selector (Nano Banana 2.1 vs Gemini 3 Pro Image)
+            // Section A: 1-Tap Official Architectural & Editorial Seals (Instant, 0ms latency)
+            Text(
+                text = "Instant Editorial & Architectural Seals",
+                style = MaterialTheme.typography.labelLarge,
+                color = glass.primaryText
+            )
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                EditorialStampPreset.entries.forEach { preset ->
+                    GlassPill(
+                        onClick = { viewModel.generateAndPreviewPresetStamp(preset) },
+                        contentPaddingHorizontal = 12.dp,
+                        contentPaddingVertical = 8.dp,
+                        modifier = Modifier.testTag("preset_stamp_${preset.name}")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Verified,
+                            contentDescription = null,
+                            tint = parseComposeHex(preset.colorHex, glass.accent),
+                            modifier = Modifier.size(15.dp)
+                        )
+                        Spacer(Modifier.width(5.dp))
+                        Text(
+                            text = preset.title,
+                            style = MaterialTheme.typography.labelLarge,
+                            color = glass.primaryText
+                        )
+                    }
+                }
+            }
+
+            // Section B: Model Selector (Nano Banana 2.1 vs Gemini 3 Pro Image)
             Text("1. Studio Model", style = MaterialTheme.typography.labelLarge, color = glass.primaryText)
             Row(
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState()),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 AiImageModelOption.entries.forEach { modelOpt ->
                     GlassPill(
                         onClick = { viewModel.setSelectedAiModel(modelOpt) },
                         isSelected = selectedModel == modelOpt,
-                        modifier = Modifier
-                            .weight(1f)
-                            .testTag("ai_model_${modelOpt.name}")
+                        modifier = Modifier.testTag("ai_model_${modelOpt.name}")
                     ) {
                         Column(horizontalAlignment = Alignment.CenterHorizontally) {
                             Text(
@@ -705,31 +747,52 @@ fun AiImageStudioSheet(
             OutlinedTextField(
                 value = prompt,
                 onValueChange = { viewModel.setAiPrompt(it) },
-                label = { Text("Describe architectural diagram, seal, or cover illustration") },
+                label = { Text("Describe custom stamp, architectural diagram, or cover art") },
                 modifier = Modifier
                     .fillMaxWidth()
                     .testTag("ai_studio_prompt_input"),
                 maxLines = 3
             )
 
-            // Generate Button
-            GlassPill(
-                onClick = { viewModel.generateAiStudioImage() },
-                isSelected = true,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .testTag("ai_studio_generate_button")
+            // Dual Synthesis Buttons: AI Smart Vector Stamp + AI Raster Image
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                Icon(Icons.Default.AutoAwesome, null, tint = glass.goldBadge, modifier = Modifier.size(18.dp))
-                Spacer(Modifier.width(8.dp))
-                Text(
-                    text = "Synthesize ${selectedSize.label} (${selectedRatio.label}) Image",
-                    style = MaterialTheme.typography.titleMedium,
-                    color = glass.primaryText
-                )
+                GlassPill(
+                    onClick = { viewModel.generateAiSmartVectorStamp() },
+                    isSelected = true,
+                    modifier = Modifier
+                        .weight(1f)
+                        .testTag("ai_smart_stamp_generate_button")
+                ) {
+                    Icon(Icons.Default.Verified, null, tint = glass.goldBadge, modifier = Modifier.size(16.dp))
+                    Spacer(Modifier.width(6.dp))
+                    Text(
+                        text = "AI Smart Stamp",
+                        style = MaterialTheme.typography.labelLarge,
+                        color = glass.primaryText
+                    )
+                }
+
+                GlassPill(
+                    onClick = { viewModel.generateAiStudioImage() },
+                    isSelected = true,
+                    modifier = Modifier
+                        .weight(1f)
+                        .testTag("ai_studio_generate_button")
+                ) {
+                    Icon(Icons.Default.AutoAwesome, null, tint = glass.goldBadge, modifier = Modifier.size(16.dp))
+                    Spacer(Modifier.width(6.dp))
+                    Text(
+                        text = "AI Image (${selectedSize.label})",
+                        style = MaterialTheme.typography.labelLarge,
+                        color = glass.primaryText
+                    )
+                }
             }
 
-            // Output Preview / 30-60s Loading State / Error State
+            // Output Preview / Loading State / Error State
             when (val state = uiState) {
                 is AiGenUiState.Idle -> {}
                 is AiGenUiState.Loading -> {
@@ -742,7 +805,7 @@ fun AiImageStudioSheet(
                     ) {
                         CircularProgressIndicator(color = glass.accent)
                         Text(
-                            text = "Synthesizing ${selectedSize.label} image with ${selectedModel.displayName} (may take 30–60s)…",
+                            text = "Synthesizing ${selectedSize.label} (${selectedRatio.label}) asset with ${selectedModel.displayName}…",
                             style = MaterialTheme.typography.bodyMedium,
                             color = glass.secondaryText
                         )
@@ -767,24 +830,24 @@ fun AiImageStudioSheet(
                             contentScale = ContentScale.Fit,
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .height(200.dp)
+                                .height(190.dp)
                                 .clip(RoundedCornerShape(18.dp))
+                                .background(Color(0xFFFAF8F3))
                                 .border(1.dp, glass.rimBorder, RoundedCornerShape(18.dp))
+                                .padding(8.dp)
                         )
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
-                            if (activeDoc != null) {
-                                GlassPill(
-                                    onClick = { viewModel.stampGeneratedAiImageOnCurrentPage() },
-                                    isSelected = true,
-                                    modifier = Modifier
-                                        .weight(1f)
-                                        .testTag("stamp_ai_image_on_page_button")
-                                ) {
-                                    Text("Stamp on Current Page", style = MaterialTheme.typography.labelLarge, color = glass.primaryText)
-                                }
+                            GlassPill(
+                                onClick = { viewModel.stampGeneratedAiImageOnCurrentPage() },
+                                isSelected = true,
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .testTag("stamp_ai_image_on_page_button")
+                            ) {
+                                Text("Stamp on PDF Page", style = MaterialTheme.typography.labelLarge, color = glass.primaryText)
                             }
                             GlassPill(
                                 onClick = { viewModel.createNewPdfFromAiImage(state.bitmap) },
@@ -803,7 +866,289 @@ fun AiImageStudioSheet(
 }
 
 /**
- * 5. Pro Toolbox Workflow Sheet (Merge, Split/Extract, Smart Compressor, Watermark, Vision OCR, Irreversible Redaction)
+ * 5. Photo Stamp & Studio Gallery Picker Sheet:
+ * Solves empty-emulator photo picker issues by providing 4 pre-bundled high-DPI architectural
+ * plates & official seals alongside direct Device Photo Picker and Document Picker launchers.
+ */
+@Composable
+fun PhotoStampPickerSheet(
+    visible: Boolean,
+    studioAssets: List<StudioGalleryAsset>,
+    isViewerActive: Boolean,
+    onSelectStudioAsset: (StudioGalleryAsset, Boolean) -> Unit,
+    onLaunchSystemPhotoPicker: () -> Unit,
+    onLaunchSystemFilePicker: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    val glass = LocalLiquidGlass.current
+
+    GlassSheet(
+        visible = visible,
+        title = if (isViewerActive) "Photo & Architectural Stamp Library" else "Images to PDF & Studio Plates",
+        subtitle = "Select a bundled high-DPI studio plate or import from device storage",
+        onDismiss = onDismiss
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .heightIn(max = 500.dp)
+                .verticalScroll(rememberScrollState()),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                GlassPill(
+                    onClick = {
+                        onDismiss()
+                        onLaunchSystemPhotoPicker()
+                    },
+                    isSelected = true,
+                    modifier = Modifier
+                        .weight(1f)
+                        .testTag("browse_device_gallery_button")
+                ) {
+                    Icon(Icons.Default.PhotoLibrary, null, tint = glass.accent, modifier = Modifier.size(17.dp))
+                    Spacer(Modifier.width(6.dp))
+                    Text("Device Gallery", style = MaterialTheme.typography.labelLarge, color = glass.primaryText)
+                }
+
+                GlassPill(
+                    onClick = {
+                        onDismiss()
+                        onLaunchSystemFilePicker()
+                    },
+                    modifier = Modifier
+                        .weight(1f)
+                        .testTag("browse_device_files_button")
+                ) {
+                    Icon(Icons.Default.Description, null, tint = glass.accent, modifier = Modifier.size(17.dp))
+                    Spacer(Modifier.width(6.dp))
+                    Text("Browse Files", style = MaterialTheme.typography.labelLarge, color = glass.primaryText)
+                }
+            }
+
+            Text(
+                text = "Bundled Architectural Plates & Transparent Seals",
+                style = MaterialTheme.typography.labelLarge,
+                color = glass.primaryText
+            )
+
+            studioAssets.forEach { asset ->
+                val previewBmp = remember(asset.filePath) {
+                    runCatching { BitmapFactory.decodeFile(asset.filePath) }.getOrNull()
+                }
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(18.dp))
+                        .background(glass.accentSoft.copy(alpha = 0.45f))
+                        .border(1.dp, glass.rimBorder, RoundedCornerShape(18.dp))
+                        .clickable {
+                            onSelectStudioAsset(asset, !isViewerActive)
+                        }
+                        .padding(12.dp)
+                        .testTag("studio_asset_${asset.id}"),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    if (previewBmp != null) {
+                        Image(
+                            bitmap = previewBmp.asImageBitmap(),
+                            contentDescription = asset.title,
+                            contentScale = ContentScale.Crop,
+                            modifier = Modifier
+                                .size(64.dp)
+                                .clip(RoundedCornerShape(12.dp))
+                                .background(Color.White)
+                                .border(1.dp, glass.rimBorder, RoundedCornerShape(12.dp))
+                        )
+                    }
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = asset.title,
+                            style = MaterialTheme.typography.titleMedium,
+                            color = glass.primaryText
+                        )
+                        Text(
+                            text = asset.subtitle,
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = glass.secondaryText
+                        )
+                    }
+                    GlassPill(
+                        onClick = { onSelectStudioAsset(asset, !isViewerActive) },
+                        isSelected = true,
+                        contentPaddingHorizontal = 12.dp,
+                        contentPaddingVertical = 7.dp
+                    ) {
+                        Text(
+                            text = if (isViewerActive) "Stamp" else "To PDF",
+                            style = MaterialTheme.typography.labelLarge,
+                            color = glass.primaryText
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+/**
+ * 6. PDF Password Unlock & Password Protection Manager Sheets:
+ * Allows locking any PDF with SHA-256 verification and unlocking protected PDFs on open.
+ */
+@Composable
+fun PasswordUnlockAndManageModals(
+    viewModel: PdfWorkspaceViewModel
+) {
+    val glass = LocalLiquidGlass.current
+    val unlockDoc by viewModel.pendingPasswordUnlockDoc.collectAsStateWithLifecycle()
+    val unlockError by viewModel.passwordUnlockError.collectAsStateWithLifecycle()
+    val manageDoc by viewModel.passwordManageTargetDoc.collectAsStateWithLifecycle()
+
+    // A. Unlock Protected PDF Sheet
+    var enteredPassword by remember(unlockDoc) { mutableStateOf("") }
+    GlassSheet(
+        visible = unlockDoc != null,
+        title = "Unlock Protected PDF",
+        subtitle = unlockDoc?.title?.removeSuffix(".pdf"),
+        onDismiss = { viewModel.dismissPasswordUnlockModal() }
+    ) {
+        val doc = unlockDoc
+        if (doc != null) {
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Icon(Icons.Default.Lock, null, tint = glass.goldBadge)
+                    Text(
+                        text = "This document is protected with a vault password.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = glass.secondaryText
+                    )
+                }
+                if (doc.passwordHint.isNotBlank()) {
+                    Text(
+                        text = "Password Hint: ${doc.passwordHint}",
+                        fontFamily = JetBrainsTabularFamily,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = glass.accent
+                    )
+                }
+                OutlinedTextField(
+                    value = enteredPassword,
+                    onValueChange = { enteredPassword = it },
+                    label = { Text("Enter Document Password") },
+                    visualTransformation = PasswordVisualTransformation(),
+                    singleLine = true,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("unlock_pdf_password_input")
+                )
+                if (unlockError != null) {
+                    Text(
+                        text = unlockError!!,
+                        style = MaterialTheme.typography.labelLarge,
+                        color = MaterialTheme.colorScheme.error
+                    )
+                }
+                GlassPill(
+                    onClick = { viewModel.submitUnlockPassword(enteredPassword) },
+                    isSelected = true,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("confirm_unlock_pdf_button")
+                ) {
+                    Icon(Icons.Default.LockOpen, null, tint = glass.primaryText, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(8.dp))
+                    Text("Unlock & Open PDF", style = MaterialTheme.typography.titleMedium, color = glass.primaryText)
+                }
+            }
+        }
+    }
+
+    // B. Set / Change / Remove PDF Password Sheet
+    var newPassword by remember(manageDoc) { mutableStateOf("") }
+    var passwordHint by remember(manageDoc) { mutableStateOf(manageDoc?.passwordHint.orEmpty()) }
+    GlassSheet(
+        visible = manageDoc != null,
+        title = "PDF Password Vault Lock",
+        subtitle = manageDoc?.title?.removeSuffix(".pdf"),
+        onDismiss = { viewModel.openPasswordManageModal(null) }
+    ) {
+        val doc = manageDoc
+        if (doc != null) {
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Text(
+                    text = if (doc.isPasswordProtected) {
+                        "This PDF is currently LOCKED. Enter a new password to update it, or remove the password lock below."
+                    } else {
+                        "Protect this PDF with a password so it requires authentication before opening."
+                    },
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = glass.secondaryText
+                )
+
+                OutlinedTextField(
+                    value = newPassword,
+                    onValueChange = { newPassword = it },
+                    label = { Text("New Vault Password") },
+                    visualTransformation = PasswordVisualTransformation(),
+                    singleLine = true,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("set_pdf_password_input")
+                )
+
+                OutlinedTextField(
+                    value = passwordHint,
+                    onValueChange = { passwordHint = it },
+                    label = { Text("Optional Password Hint") },
+                    singleLine = true,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("set_pdf_password_hint_input")
+                )
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    GlassPill(
+                        onClick = { viewModel.setDocumentPasswordProtection(doc, newPassword, passwordHint) },
+                        isSelected = true,
+                        modifier = Modifier
+                            .weight(1f)
+                            .testTag("save_pdf_password_button")
+                    ) {
+                        Icon(Icons.Default.Lock, null, tint = glass.goldBadge, modifier = Modifier.size(16.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text("Lock PDF", style = MaterialTheme.typography.titleMedium, color = glass.primaryText)
+                    }
+
+                    if (doc.isPasswordProtected) {
+                        GlassPill(
+                            onClick = { viewModel.removeDocumentPasswordProtection(doc) },
+                            modifier = Modifier
+                                .weight(1f)
+                                .testTag("remove_pdf_password_button")
+                        ) {
+                            Icon(Icons.Default.LockOpen, null, tint = glass.accent, modifier = Modifier.size(16.dp))
+                            Spacer(Modifier.width(6.dp))
+                            Text("Remove Lock", style = MaterialTheme.typography.titleMedium, color = glass.primaryText)
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/**
+ * 7. Pro Toolbox Workflow Sheet (Merge, Split/Extract, Smart Compressor, Watermark, Vision OCR, Irreversible Redaction, Password Lock)
  *    + Export & Native Share Sheet + Highlight Note Dialog.
  */
 @Composable

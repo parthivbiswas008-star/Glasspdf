@@ -11,16 +11,20 @@ import androidx.compose.animation.Crossfade
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalView
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.ui.components.DynamicIslandToast
 import com.example.ui.home.AppHomeShell
 import com.example.ui.sheets.AiImageStudioSheet
 import com.example.ui.sheets.NavigatorGlassSheet
+import com.example.ui.sheets.PasswordUnlockAndManageModals
+import com.example.ui.sheets.PhotoStampPickerSheet
 import com.example.ui.sheets.ProToolboxAndExportModals
 import com.example.ui.sheets.PropertiesGlassSheet
 import com.example.ui.sheets.SignaturePadModal
@@ -57,6 +61,9 @@ fun GlassPdfProApp(
     workspaceViewModel: PdfWorkspaceViewModel = viewModel()
 ) {
     val context = LocalContext.current
+    val localView = LocalView.current
+
+    val appSettings by workspaceViewModel.appSettings.collectAsStateWithLifecycle()
     val themeMode by workspaceViewModel.themeMode.collectAsStateWithLifecycle()
     val activeDocument by workspaceViewModel.activeDocument.collectAsStateWithLifecycle()
     val activeSnapshot by workspaceViewModel.activeSnapshot.collectAsStateWithLifecycle()
@@ -70,8 +77,18 @@ fun GlassPdfProApp(
     val showNavigatorSheet by workspaceViewModel.showNavigatorSheet.collectAsStateWithLifecycle()
     val showSignatureModal by workspaceViewModel.showSignatureModal.collectAsStateWithLifecycle()
     val showAiStudioSheet by workspaceViewModel.showAiStudioSheet.collectAsStateWithLifecycle()
+    val showPhotoStampPickerSheet by workspaceViewModel.showPhotoStampPickerSheet.collectAsStateWithLifecycle()
+    val studioGalleryAssets by workspaceViewModel.studioGalleryAssets.collectAsStateWithLifecycle()
     val toastMessage by workspaceViewModel.toastMessage.collectAsStateWithLifecycle()
     val toastBadge by workspaceViewModel.toastBadge.collectAsStateWithLifecycle()
+
+    // Apply persistent Keep Screen Awake preference
+    DisposableEffect(appSettings.keepScreenAwake) {
+        localView.keepScreenOn = appSettings.keepScreenAwake
+        onDispose {
+            localView.keepScreenOn = false
+        }
+    }
 
     // Zero-permission Android SAF Document Picker for PDFs & Images
     val openDocumentLauncher = rememberLauncherForActivityResult(
@@ -93,20 +110,22 @@ fun GlassPdfProApp(
 
     GlassPdfTheme(themeMode = themeMode) {
         Box(modifier = Modifier.fillMaxSize()) {
+            // CRITICAL PERFORMANCE FIX: Crossfade ONLY on boolean (whether a document is open),
+            // never on the entire PdfDocumentEntity object, so MobilePdfViewer is never recreated on page scroll or markup edits!
+            val isViewerOpen = activeDocument != null
             Crossfade(
-                targetState = activeDocument,
+                targetState = isViewerOpen,
                 label = "homeToViewerCrossfade"
-            ) { currentDoc ->
-                if (currentDoc == null) {
+            ) { inViewer ->
+                val currentDoc = activeDocument
+                if (!inViewer || currentDoc == null) {
                     AppHomeShell(
                         viewModel = workspaceViewModel,
                         onLaunchFilePicker = {
                             openDocumentLauncher.launch(arrayOf("application/pdf", "image/*"))
                         },
                         onLaunchPhotoPicker = {
-                            pickPhotoLauncher.launch(
-                                PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
-                            )
+                            workspaceViewModel.setPhotoStampPickerSheetVisible(true)
                         }
                     )
                 } else {
@@ -114,9 +133,7 @@ fun GlassPdfProApp(
                         doc = currentDoc,
                         viewModel = workspaceViewModel,
                         onLaunchPhotoPickerForStamp = {
-                            pickPhotoLauncher.launch(
-                                PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
-                            )
+                            workspaceViewModel.setPhotoStampPickerSheetVisible(true)
                         }
                     )
                 }
@@ -148,6 +165,7 @@ fun GlassPdfProApp(
 
             SignaturePadModal(
                 visible = showSignatureModal,
+                defaultAuthorName = appSettings.defaultAuthorName,
                 onSaveAndStamp = { label, isTyped, typedText, fontId, colorHex, pts ->
                     workspaceViewModel.saveAndStampSignature(
                         label = label,
@@ -165,6 +183,28 @@ fun GlassPdfProApp(
                 visible = showAiStudioSheet,
                 viewModel = workspaceViewModel,
                 onDismiss = { workspaceViewModel.setAiStudioSheetVisible(false) }
+            )
+
+            PhotoStampPickerSheet(
+                visible = showPhotoStampPickerSheet,
+                studioAssets = studioGalleryAssets,
+                isViewerActive = activeDocument != null,
+                onSelectStudioAsset = { asset, _ ->
+                    workspaceViewModel.stampOrConvertStudioGalleryAsset(asset)
+                },
+                onLaunchSystemPhotoPicker = {
+                    pickPhotoLauncher.launch(
+                        PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
+                    )
+                },
+                onLaunchSystemFilePicker = {
+                    openDocumentLauncher.launch(arrayOf("image/*", "application/pdf"))
+                },
+                onDismiss = { workspaceViewModel.setPhotoStampPickerSheetVisible(false) }
+            )
+
+            PasswordUnlockAndManageModals(
+                viewModel = workspaceViewModel
             )
 
             ProToolboxAndExportModals(

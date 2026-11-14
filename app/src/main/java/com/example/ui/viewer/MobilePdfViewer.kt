@@ -10,7 +10,6 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.gestures.rememberTransformableState
 import androidx.compose.foundation.gestures.transformable
@@ -37,6 +36,8 @@ import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -45,24 +46,21 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBackIos
 import androidx.compose.material.icons.automirrored.filled.Article
 import androidx.compose.material.icons.automirrored.filled.CallSplit
-import androidx.compose.material.icons.automirrored.filled.Comment
 import androidx.compose.material.icons.automirrored.filled.MergeType
 import androidx.compose.material.icons.automirrored.filled.Redo
 import androidx.compose.material.icons.automirrored.filled.Undo
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.AutoAwesome
+import androidx.compose.material.icons.filled.Bolt
 import androidx.compose.material.icons.filled.Brush
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContentCopy
-import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.Draw
-import androidx.compose.material.icons.filled.Edit
-import androidx.compose.material.icons.filled.FormatStrikethrough
-import androidx.compose.material.icons.filled.FormatUnderlined
 import androidx.compose.material.icons.filled.GridView
 import androidx.compose.material.icons.filled.Highlight
 import androidx.compose.material.icons.filled.IosShare
+import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.MoreHoriz
 import androidx.compose.material.icons.filled.NightlightRound
 import androidx.compose.material.icons.filled.Palette
@@ -70,10 +68,9 @@ import androidx.compose.material.icons.filled.PhotoLibrary
 import androidx.compose.material.icons.filled.Print
 import androidx.compose.material.icons.filled.RotateRight
 import androidx.compose.material.icons.filled.Search
-import androidx.compose.material.icons.filled.Security
+import androidx.compose.material.icons.filled.Swipe
 import androidx.compose.material.icons.filled.TextFields
 import androidx.compose.material.icons.filled.Visibility
-import androidx.compose.material.icons.filled.Waves
 import androidx.compose.material.icons.filled.ZoomIn
 import androidx.compose.material.icons.filled.ZoomOut
 import androidx.compose.material3.AlertDialog
@@ -117,6 +114,8 @@ import com.example.model.EditSubTool
 import com.example.model.FormFieldType
 import com.example.model.MarkupStyle
 import com.example.model.NormalizedPoint
+import com.example.model.PageScrollDirection
+import com.example.model.PdfCanvasPaperTint
 import com.example.model.PdfFormField
 import com.example.model.PlacedElementKind
 import com.example.model.ProToolWorkflow
@@ -140,6 +139,7 @@ fun MobilePdfViewer(
     val context = LocalContext.current
     val coroutineScope = rememberCoroutineScope()
 
+    val appSettings by viewModel.appSettings.collectAsStateWithLifecycle()
     val snapshot by viewModel.activeSnapshot.collectAsStateWithLifecycle()
     val pageBitmaps by viewModel.pageBitmaps.collectAsStateWithLifecycle()
     val currentPageIndex by viewModel.currentPageIndex.collectAsStateWithLifecycle()
@@ -169,11 +169,22 @@ fun MobilePdfViewer(
     var editingFormFieldText by remember { mutableStateOf("") }
 
     val listState = rememberLazyListState(initialFirstVisibleItemIndex = currentPageIndex)
-    val visiblePage by remember { derivedStateOf { listState.firstVisibleItemIndex } }
+    val pagerState = rememberPagerState(
+        initialPage = currentPageIndex.coerceIn(0, (doc.pageCount - 1).coerceAtLeast(0)),
+        pageCount = { doc.pageCount.coerceAtLeast(1) }
+    )
 
-    LaunchedEffect(visiblePage) {
-        if (visiblePage != currentPageIndex) {
-            viewModel.setCurrentPage(visiblePage)
+    val visibleVerticalPage by remember { derivedStateOf { listState.firstVisibleItemIndex } }
+
+    LaunchedEffect(visibleVerticalPage, appSettings.scrollDirection) {
+        if (appSettings.scrollDirection == PageScrollDirection.VERTICAL_CONTINUOUS) {
+            viewModel.onPageScrolled(visibleVerticalPage)
+        }
+    }
+
+    LaunchedEffect(pagerState.currentPage, appSettings.scrollDirection) {
+        if (appSettings.scrollDirection == PageScrollDirection.HORIZONTAL_PAGER) {
+            viewModel.onPageScrolled(pagerState.currentPage)
         }
     }
 
@@ -222,114 +233,237 @@ fun MobilePdfViewer(
                 onExitOrganizer = { viewModel.setViewerDockMode(ViewerDockMode.READ) }
             )
         } else {
-            // Main Scrolling & Pinch-Zooming Multi-Page PDF Canvas
-            LazyColumn(
-                state = listState,
-                modifier = Modifier
-                    .fillMaxSize()
-                    .transformable(state = transformableState)
-                    .graphicsLayer(
-                        scaleX = zoomScale,
-                        scaleY = zoomScale
-                    )
-                    .testTag("viewer_pdf_pages_lazy_column"),
-                contentPadding = PaddingValues(
-                    start = 14.dp,
-                    end = 26.dp,
-                    top = 92.dp,
-                    bottom = 175.dp
-                ),
-                verticalArrangement = Arrangement.spacedBy(18.dp),
-                horizontalAlignment = Alignment.CenterHorizontally
-            ) {
-                itemsIndexed((0 until doc.pageCount).toList(), key = { _, idx -> idx }) { _, pageIdx ->
-                    PdfPageLayer(
-                        pageIndex = pageIdx,
-                        pageBitmap = pageBitmaps[pageIdx],
-                        snapshot = snapshot,
-                        dockMode = dockMode,
-                        activeDrawTool = activeDrawTool,
-                        activeColorHex = activeColorHex,
-                        activeStrokeWidth = activeStrokeWidth,
-                        searchQuery = searchQuery,
-                        touchSelection = if (pageIdx == currentPageIndex) touchSelection else null,
-                        selectedExistingMarkup = if (pageIdx == currentPageIndex) selectedExistingMarkup else null,
-                        onTapNeutralSpace = { viewModel.toggleChromelessReading() },
-                        onDoubleTapZoom = { viewModel.toggleSmartZoom() },
-                        onUpdateTouchSelection = { start, end ->
-                            viewModel.setCurrentPage(pageIdx)
-                            viewModel.updateTouchSelectionDrag(pageIdx, start, end)
-                        },
-                        onSelectionFingerLift = {
-                            viewModel.onTouchSelectionFingerLift(pageIdx)
-                        },
-                        onSelectExistingMarkup = { markup ->
-                            viewModel.setCurrentPage(pageIdx)
-                            viewModel.selectExistingMarkup(markup)
-                        },
-                        onCommitInkStroke = { pts ->
-                            viewModel.commitInkStroke(pageIdx, pts)
-                        },
-                        onEraseAtPoint = { pt ->
-                            viewModel.eraseAtNormalizedPoint(pageIdx, pt)
-                        },
-                        onCommitShape = { kind, s, e ->
-                            viewModel.commitShapeAnnotation(pageIdx, kind, s, e)
-                        },
-                        onTapInEditOrSignMode = { normPt ->
-                            viewModel.setCurrentPage(pageIdx)
-                            when (dockMode) {
-                                ViewerDockMode.EDIT -> {
-                                    when (activeEditSubTool) {
-                                        EditSubTool.TEXT_BOX, EditSubTool.STICKY_NOTE -> {
-                                            pendingPlacementPoint = normPt
-                                            pendingPlacementText = ""
+            // Render either Vertical Continuous LazyColumn or Horizontal Book Flip Pager
+            if (appSettings.scrollDirection == PageScrollDirection.VERTICAL_CONTINUOUS) {
+                LazyColumn(
+                    state = listState,
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .transformable(state = transformableState)
+                        .graphicsLayer(
+                            scaleX = zoomScale,
+                            scaleY = zoomScale
+                        )
+                        .testTag("viewer_pdf_pages_lazy_column"),
+                    contentPadding = PaddingValues(
+                        start = 14.dp,
+                        end = 26.dp,
+                        top = 92.dp,
+                        bottom = 175.dp
+                    ),
+                    verticalArrangement = Arrangement.spacedBy(18.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    itemsIndexed((0 until doc.pageCount).toList(), key = { _, idx -> idx }) { _, pageIdx ->
+                        PdfPageLayer(
+                            pageIndex = pageIdx,
+                            pageBitmap = pageBitmaps[pageIdx],
+                            snapshot = snapshot,
+                            dockMode = dockMode,
+                            activeDrawTool = activeDrawTool,
+                            activeColorHex = activeColorHex,
+                            activeStrokeWidth = activeStrokeWidth,
+                            paperTint = appSettings.paperTint,
+                            searchQuery = searchQuery,
+                            touchSelection = if (pageIdx == currentPageIndex) touchSelection else null,
+                            selectedExistingMarkup = if (pageIdx == currentPageIndex) selectedExistingMarkup else null,
+                            onTapNeutralSpace = { viewModel.toggleChromelessReading() },
+                            onDoubleTapZoom = { viewModel.toggleSmartZoom() },
+                            onSelectWordOrLineAtTap = { pt, selectFullLine ->
+                                viewModel.selectWordOrLineAtTap(pageIdx, pt, selectFullLine)
+                            },
+                            onUpdateTouchSelection = { start, end ->
+                                viewModel.onPageScrolled(pageIdx)
+                                viewModel.updateTouchSelectionDrag(pageIdx, start, end)
+                            },
+                            onSelectionFingerLift = {
+                                viewModel.onTouchSelectionFingerLift(pageIdx)
+                            },
+                            onSelectExistingMarkup = { markup ->
+                                viewModel.onPageScrolled(pageIdx)
+                                viewModel.selectExistingMarkup(markup)
+                            },
+                            onCommitInkStroke = { pts ->
+                                viewModel.commitInkStroke(pageIdx, pts)
+                            },
+                            onEraseAtPoint = { pt ->
+                                viewModel.eraseAtNormalizedPoint(pageIdx, pt)
+                            },
+                            onCommitShape = { kind, s, e ->
+                                viewModel.commitShapeAnnotation(pageIdx, kind, s, e)
+                            },
+                            onTapInEditOrSignMode = { normPt ->
+                                viewModel.onPageScrolled(pageIdx)
+                                when (dockMode) {
+                                    ViewerDockMode.EDIT -> {
+                                        when (activeEditSubTool) {
+                                            EditSubTool.TEXT_BOX, EditSubTool.STICKY_NOTE -> {
+                                                pendingPlacementPoint = normPt
+                                                pendingPlacementText = ""
+                                            }
+                                            EditSubTool.IMAGE_STAMP -> viewModel.setPhotoStampPickerSheetVisible(true)
+                                            EditSubTool.AI_STUDIO_STAMP -> viewModel.setAiStudioSheetVisible(true)
                                         }
-                                        EditSubTool.IMAGE_STAMP -> onLaunchPhotoPickerForStamp()
-                                        EditSubTool.AI_STUDIO_STAMP -> viewModel.setAiStudioSheetVisible(true)
                                     }
-                                }
-                                ViewerDockMode.SIGN -> {
-                                    val firstSig = savedSignatures.firstOrNull()
-                                    if (firstSig != null) {
-                                        viewModel.stampSavedSignatureOnCurrentPage(firstSig)
-                                    } else {
-                                        viewModel.setSignatureModalVisible(true)
+                                    ViewerDockMode.SIGN -> {
+                                        val firstSig = savedSignatures.firstOrNull()
+                                        if (firstSig != null) {
+                                            viewModel.stampSavedSignatureOnCurrentPage(firstSig)
+                                        } else {
+                                            viewModel.setSignatureModalVisible(true)
+                                        }
                                     }
+                                    else -> {}
                                 }
-                                else -> {}
-                            }
-                        },
-                        onEditFormField = { field ->
-                            if (field.type == FormFieldType.CHECKBOX) {
-                                viewModel.updateFormFieldValue(field.id, newChecked = !field.isChecked)
-                            } else {
-                                editingFormField = field
-                                editingFormFieldText = field.textValue
-                            }
-                        },
-                        onDeletePlacedElement = { elId ->
-                            viewModel.deletePlacedElement(elId)
-                        },
-                        modifier = Modifier.widthIn(max = 560.dp)
-                    )
+                            },
+                            onEditFormField = { field ->
+                                if (field.type == FormFieldType.CHECKBOX) {
+                                    viewModel.updateFormFieldValue(field.id, newChecked = !field.isChecked)
+                                } else {
+                                    editingFormField = field
+                                    editingFormFieldText = field.textValue
+                                }
+                            },
+                            onDeletePlacedElement = { elId ->
+                                viewModel.deletePlacedElement(elId)
+                            },
+                            onMovePlacedElement = { elId, dx, dy ->
+                                viewModel.movePlacedElement(elId, dx, dy)
+                            },
+                            onScalePlacedElement = { elId, factor ->
+                                viewModel.scalePlacedElement(elId, factor)
+                            },
+                            modifier = Modifier.widthIn(max = 560.dp)
+                        )
+                    }
+                }
+            } else {
+                HorizontalPager(
+                    state = pagerState,
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .transformable(state = transformableState)
+                        .graphicsLayer(
+                            scaleX = zoomScale,
+                            scaleY = zoomScale
+                        )
+                        .testTag("viewer_pdf_pages_horizontal_pager"),
+                    contentPadding = PaddingValues(
+                        start = 16.dp,
+                        end = 16.dp,
+                        top = 92.dp,
+                        bottom = 175.dp
+                    ),
+                    pageSpacing = 16.dp
+                ) { pageIdx ->
+                    Box(
+                        modifier = Modifier.fillMaxSize(),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        PdfPageLayer(
+                            pageIndex = pageIdx,
+                            pageBitmap = pageBitmaps[pageIdx],
+                            snapshot = snapshot,
+                            dockMode = dockMode,
+                            activeDrawTool = activeDrawTool,
+                            activeColorHex = activeColorHex,
+                            activeStrokeWidth = activeStrokeWidth,
+                            paperTint = appSettings.paperTint,
+                            searchQuery = searchQuery,
+                            touchSelection = if (pageIdx == currentPageIndex) touchSelection else null,
+                            selectedExistingMarkup = if (pageIdx == currentPageIndex) selectedExistingMarkup else null,
+                            onTapNeutralSpace = { viewModel.toggleChromelessReading() },
+                            onDoubleTapZoom = { viewModel.toggleSmartZoom() },
+                            onSelectWordOrLineAtTap = { pt, selectFullLine ->
+                                viewModel.selectWordOrLineAtTap(pageIdx, pt, selectFullLine)
+                            },
+                            onUpdateTouchSelection = { start, end ->
+                                viewModel.onPageScrolled(pageIdx)
+                                viewModel.updateTouchSelectionDrag(pageIdx, start, end)
+                            },
+                            onSelectionFingerLift = {
+                                viewModel.onTouchSelectionFingerLift(pageIdx)
+                            },
+                            onSelectExistingMarkup = { markup ->
+                                viewModel.onPageScrolled(pageIdx)
+                                viewModel.selectExistingMarkup(markup)
+                            },
+                            onCommitInkStroke = { pts ->
+                                viewModel.commitInkStroke(pageIdx, pts)
+                            },
+                            onEraseAtPoint = { pt ->
+                                viewModel.eraseAtNormalizedPoint(pageIdx, pt)
+                            },
+                            onCommitShape = { kind, s, e ->
+                                viewModel.commitShapeAnnotation(pageIdx, kind, s, e)
+                            },
+                            onTapInEditOrSignMode = { normPt ->
+                                viewModel.onPageScrolled(pageIdx)
+                                when (dockMode) {
+                                    ViewerDockMode.EDIT -> {
+                                        when (activeEditSubTool) {
+                                            EditSubTool.TEXT_BOX, EditSubTool.STICKY_NOTE -> {
+                                                pendingPlacementPoint = normPt
+                                                pendingPlacementText = ""
+                                            }
+                                            EditSubTool.IMAGE_STAMP -> viewModel.setPhotoStampPickerSheetVisible(true)
+                                            EditSubTool.AI_STUDIO_STAMP -> viewModel.setAiStudioSheetVisible(true)
+                                        }
+                                    }
+                                    ViewerDockMode.SIGN -> {
+                                        val firstSig = savedSignatures.firstOrNull()
+                                        if (firstSig != null) {
+                                            viewModel.stampSavedSignatureOnCurrentPage(firstSig)
+                                        } else {
+                                            viewModel.setSignatureModalVisible(true)
+                                        }
+                                    }
+                                    else -> {}
+                                }
+                            },
+                            onEditFormField = { field ->
+                                if (field.type == FormFieldType.CHECKBOX) {
+                                    viewModel.updateFormFieldValue(field.id, newChecked = !field.isChecked)
+                                } else {
+                                    editingFormField = field
+                                    editingFormFieldText = field.textValue
+                                }
+                            },
+                            onDeletePlacedElement = { elId ->
+                                viewModel.deletePlacedElement(elId)
+                            },
+                            onMovePlacedElement = { elId, dx, dy ->
+                                viewModel.movePlacedElement(elId, dx, dy)
+                            },
+                            onScalePlacedElement = { elId, factor ->
+                                viewModel.scalePlacedElement(elId, factor)
+                            },
+                            modifier = Modifier.widthIn(max = 560.dp)
+                        )
+                    }
                 }
             }
 
             // Right-Edge Fast-Scroll Scrubber with Live Frosted Page Bubble
-            FastScrollGlassScrubber(
-                currentPage = currentPageIndex,
-                totalPages = doc.pageCount,
-                onScrubToPage = { targetPage ->
-                    viewModel.setCurrentPage(targetPage)
-                    coroutineScope.launch {
-                        listState.scrollToItem(targetPage)
-                    }
-                },
-                modifier = Modifier
-                    .align(Alignment.CenterEnd)
-                    .padding(end = 6.dp)
-            )
+            if (appSettings.showFastScrollScrubber) {
+                FastScrollGlassScrubber(
+                    currentPage = currentPageIndex,
+                    totalPages = doc.pageCount,
+                    onScrubToPage = { targetPage ->
+                        viewModel.setCurrentPage(targetPage)
+                        coroutineScope.launch {
+                            if (appSettings.scrollDirection == PageScrollDirection.VERTICAL_CONTINUOUS) {
+                                listState.scrollToItem(targetPage)
+                            } else {
+                                pagerState.scrollToPage(targetPage)
+                            }
+                        }
+                    },
+                    modifier = Modifier
+                        .align(Alignment.CenterEnd)
+                        .padding(end = 6.dp)
+                )
+            }
         }
 
         // FLOATING LIQUID GLASS ACTION PILL FOR TEXT SELECTION OR EXISTING HIGHLIGHT
@@ -362,6 +496,8 @@ fun MobilePdfViewer(
                         viewModel.updateExistingMarkup(selectedExistingMarkup!!.copy(style = style))
                     }
                 },
+                onExpandLine = { viewModel.expandCurrentSelectionToFullLine() },
+                onExpandParagraph = { viewModel.expandCurrentSelectionToParagraph() },
                 onCopyText = { viewModel.copySelectedTextToClipboard(context) },
                 onAddOrEditNote = {
                     if (touchSelection != null) {
@@ -400,8 +536,11 @@ fun MobilePdfViewer(
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 ViewerTopGlassHeader(
                     title = doc.title.removeSuffix(".pdf"),
+                    isPasswordProtected = doc.isPasswordProtected,
                     canUndo = canUndo,
                     canRedo = canRedo,
+                    currentPaperTint = appSettings.paperTint,
+                    currentScrollDirection = appSettings.scrollDirection,
                     onBack = { viewModel.closeActiveDocument() },
                     onToggleSearch = { viewModel.setViewerSearchVisible(!isSearchVisible) },
                     onUndo = { viewModel.undo() },
@@ -410,6 +549,22 @@ fun MobilePdfViewer(
                     onToggleNightMode = {
                         val next = if (glass.isDark) GlassThemeMode.LIGHT_ALABASTER else GlassThemeMode.DARK_OBSIDIAN
                         viewModel.setThemeMode(next)
+                    },
+                    onCyclePaperTint = {
+                        val entries = PdfCanvasPaperTint.entries
+                        val nextIdx = (entries.indexOf(appSettings.paperTint) + 1) % entries.size
+                        viewModel.setPdfCanvasPaperTint(entries[nextIdx])
+                    },
+                    onToggleScrollDirection = {
+                        val next = if (appSettings.scrollDirection == PageScrollDirection.VERTICAL_CONTINUOUS) {
+                            PageScrollDirection.HORIZONTAL_PAGER
+                        } else {
+                            PageScrollDirection.VERTICAL_CONTINUOUS
+                        }
+                        viewModel.setPageScrollDirection(next)
+                    },
+                    onOpenPasswordModal = {
+                        viewModel.openPasswordManageModal(doc)
                     },
                     onOpenExportSheet = { viewModel.setExportSheetVisible(true) },
                     onPrint = { viewModel.printActiveDocument(context) }
@@ -538,14 +693,20 @@ fun MobilePdfViewer(
                 SecondaryModeSubToolbarPill(
                     dockMode = dockMode,
                     activeMarkupStyle = activeMarkupStyle,
+                    instantHighlightOnDrag = appSettings.instantHighlightOnDrag,
                     activeDrawTool = activeDrawTool,
                     activeEditSubTool = activeEditSubTool,
                     onSelectMarkupStyle = { viewModel.setActiveMarkupStyle(it) },
+                    onToggleInstantHighlight = {
+                        viewModel.setInstantHighlightOnDrag(!appSettings.instantHighlightOnDrag)
+                    },
                     onSelectDrawTool = { viewModel.setActiveDrawTool(it) },
                     onSelectEditSubTool = { subTool ->
                         viewModel.setActiveEditSubTool(subTool)
-                        if (subTool == EditSubTool.IMAGE_STAMP) {
-                            onLaunchPhotoPickerForStamp()
+                        when (subTool) {
+                            EditSubTool.IMAGE_STAMP -> viewModel.setPhotoStampPickerSheetVisible(true)
+                            EditSubTool.AI_STUDIO_STAMP -> viewModel.setAiStudioSheetVisible(true)
+                            else -> {}
                         }
                     },
                     onOpenSignatureModal = { viewModel.setSignatureModalVisible(true) },
@@ -662,14 +823,20 @@ fun MobilePdfViewer(
 @Composable
 private fun ViewerTopGlassHeader(
     title: String,
+    isPasswordProtected: Boolean,
     canUndo: Boolean,
     canRedo: Boolean,
+    currentPaperTint: PdfCanvasPaperTint,
+    currentScrollDirection: PageScrollDirection,
     onBack: () -> Unit,
     onToggleSearch: () -> Unit,
     onUndo: () -> Unit,
     onRedo: () -> Unit,
     onToggleReflow: () -> Unit,
     onToggleNightMode: () -> Unit,
+    onCyclePaperTint: () -> Unit,
+    onToggleScrollDirection: () -> Unit,
+    onOpenPasswordModal: () -> Unit,
     onOpenExportSheet: () -> Unit,
     onPrint: () -> Unit
 ) {
@@ -700,6 +867,17 @@ private fun ViewerTopGlassHeader(
                     contentDescription = "Back to Library",
                     tint = glass.primaryText,
                     modifier = Modifier.size(18.dp)
+                )
+            }
+
+            if (isPasswordProtected) {
+                Icon(
+                    imageVector = Icons.Default.Lock,
+                    contentDescription = "Password Protected",
+                    tint = glass.goldBadge,
+                    modifier = Modifier
+                        .size(16.dp)
+                        .padding(end = 4.dp)
                 )
             }
 
@@ -773,6 +951,32 @@ private fun ViewerTopGlassHeader(
                         }
                     )
                     DropdownMenuItem(
+                        text = { Text("Paper Tint: ${currentPaperTint.label}") },
+                        leadingIcon = { Icon(Icons.Default.Palette, null) },
+                        onClick = {
+                            moreExpanded = false
+                            onCyclePaperTint()
+                        }
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Scroll: ${currentScrollDirection.label}") },
+                        leadingIcon = { Icon(Icons.Default.Swipe, null) },
+                        onClick = {
+                            moreExpanded = false
+                            onToggleScrollDirection()
+                        }
+                    )
+                    DropdownMenuItem(
+                        text = {
+                            Text(if (isPasswordProtected) "Manage / Remove PDF Password" else "Password Protect PDF")
+                        },
+                        leadingIcon = { Icon(Icons.Default.Lock, null) },
+                        onClick = {
+                            moreExpanded = false
+                            onOpenPasswordModal()
+                        }
+                    )
+                    DropdownMenuItem(
                         text = { Text("Toggle Alabaster / Obsidian Glass") },
                         leadingIcon = { Icon(Icons.Default.NightlightRound, null) },
                         onClick = {
@@ -806,9 +1010,11 @@ private fun ViewerTopGlassHeader(
 private fun SecondaryModeSubToolbarPill(
     dockMode: ViewerDockMode,
     activeMarkupStyle: MarkupStyle,
+    instantHighlightOnDrag: Boolean,
     activeDrawTool: DrawToolType,
     activeEditSubTool: EditSubTool,
     onSelectMarkupStyle: (MarkupStyle) -> Unit,
+    onToggleInstantHighlight: () -> Unit,
     onSelectDrawTool: (DrawToolType) -> Unit,
     onSelectEditSubTool: (EditSubTool) -> Unit,
     onOpenSignatureModal: () -> Unit,
@@ -834,6 +1040,26 @@ private fun SecondaryModeSubToolbarPill(
         ) {
             when (dockMode) {
                 ViewerDockMode.ANNOTATE -> {
+                    GlassPill(
+                        onClick = onToggleInstantHighlight,
+                        isSelected = instantHighlightOnDrag,
+                        contentPaddingHorizontal = 11.dp,
+                        contentPaddingVertical = 8.dp,
+                        modifier = Modifier.testTag("toggle_instant_highlight_pill")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Bolt,
+                            contentDescription = null,
+                            tint = if (instantHighlightOnDrag) glass.goldBadge else glass.secondaryText,
+                            modifier = Modifier.size(15.dp)
+                        )
+                        Spacer(Modifier.width(4.dp))
+                        Text(
+                            text = if (instantHighlightOnDrag) "Instant: ON" else "Handles Mode",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = glass.primaryText
+                        )
+                    }
                     MarkupStyle.entries.forEach { style ->
                         GlassPill(
                             onClick = { onSelectMarkupStyle(style) },
@@ -871,6 +1097,14 @@ private fun SecondaryModeSubToolbarPill(
                                     imageVector = Icons.Default.AutoAwesome,
                                     contentDescription = null,
                                     tint = glass.goldBadge,
+                                    modifier = Modifier.size(15.dp)
+                                )
+                                Spacer(Modifier.width(5.dp))
+                            } else if (sub == EditSubTool.IMAGE_STAMP) {
+                                Icon(
+                                    imageVector = Icons.Default.PhotoLibrary,
+                                    contentDescription = null,
+                                    tint = glass.accent,
                                     modifier = Modifier.size(15.dp)
                                 )
                                 Spacer(Modifier.width(5.dp))

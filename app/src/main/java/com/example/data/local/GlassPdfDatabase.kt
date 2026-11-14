@@ -25,7 +25,10 @@ data class PdfDocumentEntity(
     val categoryTag: String = "Architecture",
     val lastOpenedAt: Long = System.currentTimeMillis(),
     val createdAt: Long = System.currentTimeMillis(),
-    val annotationsJson: String = ""
+    val annotationsJson: String = "",
+    val isPasswordProtected: Boolean = false,
+    val passwordHash: String = "",
+    val passwordHint: String = ""
 )
 
 @Entity(tableName = "saved_signatures")
@@ -73,7 +76,7 @@ interface GlassPdfDao {
 
 @Database(
     entities = [PdfDocumentEntity::class, SavedSignatureEntity::class],
-    version = 1,
+    version = 2,
     exportSchema = false
 )
 abstract class GlassPdfDatabase : RoomDatabase() {
