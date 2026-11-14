@@ -8,6 +8,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -114,6 +115,7 @@ fun PdfPageLayer(
     pageBitmap: Bitmap?,
     snapshot: DocumentAnnotationsSnapshot,
     dockMode: ViewerDockMode,
+    readModeStickyNoteActive: Boolean = false,
     activeDrawTool: DrawToolType,
     activeColorHex: String,
     activeStrokeWidth: Float,
@@ -131,6 +133,7 @@ fun PdfPageLayer(
     onEraseAtPoint: (NormalizedPoint) -> Unit,
     onCommitShape: (ShapeKind, NormalizedPoint, NormalizedPoint) -> Unit,
     onTapInEditOrSignMode: (NormalizedPoint) -> Unit,
+    onPlaceStickyNoteInReadMode: (NormalizedPoint) -> Unit = {},
     onEditFormField: (PdfFormField) -> Unit,
     onMovePlacedElement: (String, Float, Float) -> Unit = { _, _, _ -> },
     onScalePlacedElement: (String, Float) -> Unit = { _, _ -> },
@@ -185,9 +188,8 @@ fun PdfPageLayer(
         }
     }
 
-    // Only attach 1-finger drag gesture interceptor in ANNOTATE or DRAW mode!
-    // In READ mode, leaving 1-finger drag unintercepted gives 120fps native LazyColumn scrolling.
-    val enableCanvasDragInterceptor = dockMode == ViewerDockMode.ANNOTATE || dockMode == ViewerDockMode.DRAW
+    val enableFullCanvasDragInterceptor = dockMode == ViewerDockMode.ANNOTATE || dockMode == ViewerDockMode.DRAW
+    val enableReadHorizontalSelectDrag = dockMode == ViewerDockMode.READ && !readModeStickyNoteActive
 
     BoxWithConstraints(
         modifier = modifier
@@ -216,7 +218,7 @@ fun PdfPageLayer(
         // LAYER 2: Gesture & Normalized Vector Canvas Overlay
         val gestureModifier = Modifier
             .fillMaxSize()
-            .pointerInput(dockMode, activeDrawTool, pageIndex, pageMarkups) {
+            .pointerInput(dockMode, readModeStickyNoteActive, activeDrawTool, pageIndex, pageMarkups) {
                 detectTapGestures(
                     onDoubleTap = { onDoubleTapZoom() },
                     onLongPress = { offset ->
@@ -237,11 +239,15 @@ fun PdfPageLayer(
                         }
                         if (hitMarkup != null) {
                             onSelectExistingMarkup(hitMarkup)
-                        } else if (dockMode == ViewerDockMode.ANNOTATE) {
-                            // In Annotate mode, tapping a word selects it immediately for quick highlight!
+                        } else if (dockMode == ViewerDockMode.READ && readModeStickyNoteActive) {
+                            onPlaceStickyNoteInReadMode(normPt)
+                        } else if (dockMode == ViewerDockMode.READ || dockMode == ViewerDockMode.ANNOTATE) {
+                            // In both READ and ANNOTATE modes, tapping a word selects it for highlighting & sticky notes!
                             val selected = onSelectWordOrLineAtTap(normPt, false)
                             if (selected) {
-                                onSelectionFingerLift()
+                                if (dockMode == ViewerDockMode.ANNOTATE) {
+                                    onSelectionFingerLift()
+                                }
                             } else {
                                 onTapNeutralSpace()
                             }
@@ -254,7 +260,41 @@ fun PdfPageLayer(
                 )
             }
             .then(
-                if (enableCanvasDragInterceptor) {
+                if (enableReadHorizontalSelectDrag) {
+                    // In READ mode, horizontal drag across text selects & highlights lines without blocking vertical scroll!
+                    Modifier.pointerInput(pageIndex) {
+                        detectHorizontalDragGestures(
+                            onDragStart = { startOffset ->
+                                val startNorm = NormalizedPoint(
+                                    x = (startOffset.x / size.width).coerceIn(0f, 1f),
+                                    y = (startOffset.y / size.height).coerceIn(0f, 1f)
+                                )
+                                dragStartNorm = startNorm
+                                dragCurrentNorm = startNorm
+                                onUpdateTouchSelection(startNorm, startNorm)
+                            },
+                            onHorizontalDrag = { change, _ ->
+                                change.consume()
+                                val currNorm = NormalizedPoint(
+                                    x = (change.position.x / size.width).coerceIn(0f, 1f),
+                                    y = (change.position.y / size.height).coerceIn(0f, 1f)
+                                )
+                                dragCurrentNorm = currNorm
+                                val startNorm = dragStartNorm ?: currNorm
+                                onUpdateTouchSelection(startNorm, currNorm)
+                            },
+                            onDragEnd = {
+                                onSelectionFingerLift()
+                                dragStartNorm = null
+                                dragCurrentNorm = null
+                            },
+                            onDragCancel = {
+                                dragStartNorm = null
+                                dragCurrentNorm = null
+                            }
+                        )
+                    }
+                } else if (enableFullCanvasDragInterceptor) {
                     Modifier.pointerInput(dockMode, activeDrawTool, pageIndex) {
                         detectDragGestures(
                             onDragStart = { startOffset ->
@@ -874,6 +914,7 @@ fun TouchSelectionGlassPill(
     onExpandParagraph: () -> Unit = {},
     onCopyText: () -> Unit,
     onAddOrEditNote: () -> Unit,
+    onDropStickyNoteAtSelection: () -> Unit = {},
     onDeleteExistingMarkup: () -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -939,7 +980,7 @@ fun TouchSelectionGlassPill(
                 }
             }
 
-            // Row 2: Style Toggles (Highlight, Underline, Strikethrough, Squiggly) + Copy + Note + Delete
+            // Row 2: Style Toggles (Highlight, Underline, Strikethrough, Squiggly) + Copy + Note + Sticky Note + Delete
             Row(
                 horizontalArrangement = Arrangement.spacedBy(6.dp),
                 verticalAlignment = Alignment.CenterVertically
@@ -973,24 +1014,37 @@ fun TouchSelectionGlassPill(
 
                 GlassPill(
                     onClick = onCopyText,
-                    contentPaddingHorizontal = 10.dp,
+                    contentPaddingHorizontal = 9.dp,
                     contentPaddingVertical = 7.dp,
                     modifier = Modifier.testTag("selection_copy_button")
                 ) {
-                    Icon(Icons.Default.ContentCopy, "Copy", tint = glass.primaryText, modifier = Modifier.size(16.dp))
-                    Spacer(Modifier.width(4.dp))
+                    Icon(Icons.Default.ContentCopy, "Copy", tint = glass.primaryText, modifier = Modifier.size(15.dp))
+                    Spacer(Modifier.width(3.dp))
                     Text("Copy", style = MaterialTheme.typography.labelSmall, color = glass.primaryText)
                 }
 
                 GlassPill(
                     onClick = onAddOrEditNote,
-                    contentPaddingHorizontal = 10.dp,
+                    contentPaddingHorizontal = 9.dp,
                     contentPaddingVertical = 7.dp,
                     modifier = Modifier.testTag("selection_note_button")
                 ) {
-                    Icon(Icons.Default.EditNote, "Note", tint = glass.primaryText, modifier = Modifier.size(17.dp))
-                    Spacer(Modifier.width(4.dp))
+                    Icon(Icons.Default.EditNote, "Note", tint = glass.primaryText, modifier = Modifier.size(16.dp))
+                    Spacer(Modifier.width(3.dp))
                     Text("Note", style = MaterialTheme.typography.labelSmall, color = glass.primaryText)
+                }
+
+                if (selection != null) {
+                    GlassPill(
+                        onClick = onDropStickyNoteAtSelection,
+                        contentPaddingHorizontal = 9.dp,
+                        contentPaddingVertical = 7.dp,
+                        modifier = Modifier.testTag("selection_sticky_note_button")
+                    ) {
+                        Icon(Icons.AutoMirrored.Filled.Comment, "Sticky Note", tint = glass.goldBadge, modifier = Modifier.size(15.dp))
+                        Spacer(Modifier.width(3.dp))
+                        Text("Sticky", style = MaterialTheme.typography.labelSmall, color = glass.primaryText)
+                    }
                 }
 
                 if (existingMarkup != null) {

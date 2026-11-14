@@ -46,6 +46,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBackIos
 import androidx.compose.material.icons.automirrored.filled.Article
 import androidx.compose.material.icons.automirrored.filled.CallSplit
+import androidx.compose.material.icons.automirrored.filled.Comment
 import androidx.compose.material.icons.automirrored.filled.MergeType
 import androidx.compose.material.icons.automirrored.filled.Redo
 import androidx.compose.material.icons.automirrored.filled.Undo
@@ -162,7 +163,9 @@ fun MobilePdfViewer(
     val searchQuery by viewModel.viewerSearchQuery.collectAsStateWithLifecycle()
     val savedSignatures by viewModel.savedSignatures.collectAsStateWithLifecycle()
 
-    // Dialog states for Text Box / Sticky Note placement and AcroForm editing
+    // Dialog states for Text Box / Sticky Note placement, Read Mode Sticky Note tool, and AcroForm editing
+    var readModeStickyNoteActive by remember { mutableStateOf(false) }
+    var forceStickyNotePlacement by remember { mutableStateOf(false) }
     var pendingPlacementPoint by remember { mutableStateOf<NormalizedPoint?>(null) }
     var pendingPlacementText by remember { mutableStateOf("") }
     var editingFormField by remember { mutableStateOf<PdfFormField?>(null) }
@@ -260,6 +263,7 @@ fun MobilePdfViewer(
                             pageBitmap = pageBitmaps[pageIdx],
                             snapshot = snapshot,
                             dockMode = dockMode,
+                            readModeStickyNoteActive = readModeStickyNoteActive,
                             activeDrawTool = activeDrawTool,
                             activeColorHex = activeColorHex,
                             activeStrokeWidth = activeStrokeWidth,
@@ -298,6 +302,7 @@ fun MobilePdfViewer(
                                     ViewerDockMode.EDIT -> {
                                         when (activeEditSubTool) {
                                             EditSubTool.TEXT_BOX, EditSubTool.STICKY_NOTE -> {
+                                                forceStickyNotePlacement = (activeEditSubTool == EditSubTool.STICKY_NOTE)
                                                 pendingPlacementPoint = normPt
                                                 pendingPlacementText = ""
                                             }
@@ -315,6 +320,12 @@ fun MobilePdfViewer(
                                     }
                                     else -> {}
                                 }
+                            },
+                            onPlaceStickyNoteInReadMode = { normPt ->
+                                viewModel.onPageScrolled(pageIdx)
+                                forceStickyNotePlacement = true
+                                pendingPlacementPoint = normPt
+                                pendingPlacementText = ""
                             },
                             onEditFormField = { field ->
                                 if (field.type == FormFieldType.CHECKBOX) {
@@ -365,6 +376,7 @@ fun MobilePdfViewer(
                             pageBitmap = pageBitmaps[pageIdx],
                             snapshot = snapshot,
                             dockMode = dockMode,
+                            readModeStickyNoteActive = readModeStickyNoteActive,
                             activeDrawTool = activeDrawTool,
                             activeColorHex = activeColorHex,
                             activeStrokeWidth = activeStrokeWidth,
@@ -403,6 +415,7 @@ fun MobilePdfViewer(
                                     ViewerDockMode.EDIT -> {
                                         when (activeEditSubTool) {
                                             EditSubTool.TEXT_BOX, EditSubTool.STICKY_NOTE -> {
+                                                forceStickyNotePlacement = (activeEditSubTool == EditSubTool.STICKY_NOTE)
                                                 pendingPlacementPoint = normPt
                                                 pendingPlacementText = ""
                                             }
@@ -420,6 +433,12 @@ fun MobilePdfViewer(
                                     }
                                     else -> {}
                                 }
+                            },
+                            onPlaceStickyNoteInReadMode = { normPt ->
+                                viewModel.onPageScrolled(pageIdx)
+                                forceStickyNotePlacement = true
+                                pendingPlacementPoint = normPt
+                                pendingPlacementText = ""
                             },
                             onEditFormField = { field ->
                                 if (field.type == FormFieldType.CHECKBOX) {
@@ -510,6 +529,14 @@ fun MobilePdfViewer(
                     } else if (selectedExistingMarkup != null) {
                         viewModel.openNoteEditorForMarkup(selectedExistingMarkup)
                     }
+                },
+                onDropStickyNoteAtSelection = {
+                    val anchor = touchSelection?.pillAnchor ?: NormalizedPoint(0.5f, 0.45f)
+                    val prefill = touchSelection?.selectedText?.take(80).orEmpty()
+                    viewModel.clearTouchSelection()
+                    forceStickyNotePlacement = true
+                    pendingPlacementPoint = anchor
+                    pendingPlacementText = if (prefill.isNotBlank()) "Re: \"$prefill\" — " else ""
                 },
                 onDeleteExistingMarkup = {
                     selectedExistingMarkup?.let { viewModel.deleteExistingMarkup(it.id) }
@@ -689,13 +716,22 @@ fun MobilePdfViewer(
                     }
                 }
 
-                // Row B: Secondary Floating Glass Sub-Toolbar Pill (contextual to active mode)
+                // Row B: Secondary Floating Glass Sub-Toolbar Pill (contextual to active mode, including Read Mode!)
                 SecondaryModeSubToolbarPill(
                     dockMode = dockMode,
+                    readModeStickyNoteActive = readModeStickyNoteActive,
                     activeMarkupStyle = activeMarkupStyle,
                     instantHighlightOnDrag = appSettings.instantHighlightOnDrag,
                     activeDrawTool = activeDrawTool,
                     activeEditSubTool = activeEditSubTool,
+                    onToggleReadModeStickyNote = {
+                        readModeStickyNoteActive = !readModeStickyNoteActive
+                    },
+                    onQuickDropStickyNoteInReadMode = {
+                        forceStickyNotePlacement = true
+                        pendingPlacementPoint = NormalizedPoint(0.5f, 0.42f)
+                        pendingPlacementText = ""
+                    },
                     onSelectMarkupStyle = { viewModel.setActiveMarkupStyle(it) },
                     onToggleInstantHighlight = {
                         viewModel.setInstantHighlightOnDrag(!appSettings.instantHighlightOnDrag)
@@ -719,7 +755,10 @@ fun MobilePdfViewer(
                 // Row C: Primary Multi-Mode Bottom Tool Dock (Read, Annotate, Draw, Edit, Sign, Pages)
                 PrimaryBottomToolDock(
                     activeMode = dockMode,
-                    onSelectMode = { viewModel.setViewerDockMode(it) }
+                    onSelectMode = {
+                        readModeStickyNoteActive = false
+                        viewModel.setViewerDockMode(it)
+                    }
                 )
             }
         }
@@ -727,20 +766,25 @@ fun MobilePdfViewer(
 
     // Dialog for placing a Text Box or Sticky Note
     if (pendingPlacementPoint != null) {
-        val kind = if (activeEditSubTool == EditSubTool.STICKY_NOTE) {
+        val kind = if (forceStickyNotePlacement || readModeStickyNoteActive || activeEditSubTool == EditSubTool.STICKY_NOTE) {
             PlacedElementKind.STICKY_NOTE
         } else {
             PlacedElementKind.TEXT_BOX
         }
         AlertDialog(
-            onDismissRequest = { pendingPlacementPoint = null },
+            onDismissRequest = {
+                pendingPlacementPoint = null
+                forceStickyNotePlacement = false
+            },
             title = { Text("Add ${kind.label}") },
             text = {
                 OutlinedTextField(
                     value = pendingPlacementText,
                     onValueChange = { pendingPlacementText = it },
-                    label = { Text("Enter text content") },
-                    modifier = Modifier.fillMaxWidth()
+                    label = { Text("Enter ${kind.label.lowercase()} content") },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("placement_text_input")
                 )
             },
             confirmButton = {
@@ -756,13 +800,20 @@ fun MobilePdfViewer(
                             )
                         }
                         pendingPlacementPoint = null
-                    }
+                        forceStickyNotePlacement = false
+                    },
+                    modifier = Modifier.testTag("confirm_place_element_button")
                 ) {
                     Text("Place on Page")
                 }
             },
             dismissButton = {
-                TextButton(onClick = { pendingPlacementPoint = null }) {
+                TextButton(
+                    onClick = {
+                        pendingPlacementPoint = null
+                        forceStickyNotePlacement = false
+                    }
+                ) {
                     Text("Cancel")
                 }
             }
@@ -1009,10 +1060,13 @@ private fun ViewerTopGlassHeader(
 @Composable
 private fun SecondaryModeSubToolbarPill(
     dockMode: ViewerDockMode,
+    readModeStickyNoteActive: Boolean = false,
     activeMarkupStyle: MarkupStyle,
     instantHighlightOnDrag: Boolean,
     activeDrawTool: DrawToolType,
     activeEditSubTool: EditSubTool,
+    onToggleReadModeStickyNote: () -> Unit = {},
+    onQuickDropStickyNoteInReadMode: () -> Unit = {},
     onSelectMarkupStyle: (MarkupStyle) -> Unit,
     onToggleInstantHighlight: () -> Unit,
     onSelectDrawTool: (DrawToolType) -> Unit,
@@ -1021,7 +1075,7 @@ private fun SecondaryModeSubToolbarPill(
     onStampQuickSignature: () -> Unit
 ) {
     val glass = LocalLiquidGlass.current
-    if (dockMode == ViewerDockMode.READ || dockMode == ViewerDockMode.PAGES) return
+    if (dockMode == ViewerDockMode.PAGES) return
 
     GlassSurface(
         modifier = Modifier
@@ -1039,6 +1093,61 @@ private fun SecondaryModeSubToolbarPill(
             verticalAlignment = Alignment.CenterVertically
         ) {
             when (dockMode) {
+                ViewerDockMode.READ -> {
+                    GlassPill(
+                        onClick = { if (readModeStickyNoteActive) onToggleReadModeStickyNote() },
+                        isSelected = !readModeStickyNoteActive,
+                        contentPaddingHorizontal = 12.dp,
+                        contentPaddingVertical = 8.dp,
+                        modifier = Modifier.testTag("read_mode_select_highlight_pill")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Highlight,
+                            contentDescription = null,
+                            tint = if (!readModeStickyNoteActive) glass.accent else glass.secondaryText,
+                            modifier = Modifier.size(15.dp)
+                        )
+                        Spacer(Modifier.width(5.dp))
+                        Text("Select & Highlight", style = MaterialTheme.typography.labelLarge, color = glass.primaryText)
+                    }
+
+                    GlassPill(
+                        onClick = onToggleReadModeStickyNote,
+                        isSelected = readModeStickyNoteActive,
+                        contentPaddingHorizontal = 12.dp,
+                        contentPaddingVertical = 8.dp,
+                        modifier = Modifier.testTag("read_mode_sticky_note_pill")
+                    ) {
+                        Icon(
+                            imageVector = Icons.AutoMirrored.Filled.Comment,
+                            contentDescription = null,
+                            tint = glass.goldBadge,
+                            modifier = Modifier.size(15.dp)
+                        )
+                        Spacer(Modifier.width(5.dp))
+                        Text(
+                            text = if (readModeStickyNoteActive) "Tap Page for Sticky Note" else "Sticky Note Tool",
+                            style = MaterialTheme.typography.labelLarge,
+                            color = glass.primaryText
+                        )
+                    }
+
+                    GlassPill(
+                        onClick = onQuickDropStickyNoteInReadMode,
+                        contentPaddingHorizontal = 12.dp,
+                        contentPaddingVertical = 8.dp,
+                        modifier = Modifier.testTag("read_mode_quick_add_sticky_button")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Add,
+                            contentDescription = null,
+                            tint = glass.accent,
+                            modifier = Modifier.size(15.dp)
+                        )
+                        Spacer(Modifier.width(4.dp))
+                        Text("+ Add Sticky Note", style = MaterialTheme.typography.labelLarge, color = glass.primaryText)
+                    }
+                }
                 ViewerDockMode.ANNOTATE -> {
                     GlassPill(
                         onClick = onToggleInstantHighlight,
