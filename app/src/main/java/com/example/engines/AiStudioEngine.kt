@@ -13,9 +13,11 @@ import com.google.firebase.ai.type.ImagePart
 import com.google.firebase.ai.type.ResponseModality
 import com.google.firebase.ai.type.content
 import com.google.firebase.ai.type.generationConfig
+import com.google.firebase.appcheck.FirebaseAppCheck
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.TimeoutCancellationException
+import kotlinx.coroutines.tasks.await
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 
@@ -32,6 +34,34 @@ object AiStudioEngine {
 
     private val ocrVisionModel by lazy {
         Firebase.ai.generativeModel("gemini-3.8-flash")
+    }
+
+    /**
+     * Ensures a valid App Check token is active and automatically forces a token refresh
+     * retry once if the first call encounters a stale App Check token error.
+     */
+    private suspend fun <T> executeWithAppCheckRefresh(block: suspend () -> T): T {
+        return try {
+            block()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            val msg = e.message.orEmpty()
+            if (msg.contains("App Check", ignoreCase = true) ||
+                msg.contains("token is invalid", ignoreCase = true) ||
+                msg.contains("403", ignoreCase = true)
+            ) {
+                Log.w(TAG, "Refreshing Firebase App Check token and retrying once...", e)
+                try {
+                    FirebaseAppCheck.getInstance().getAppCheckToken(true).await()
+                } catch (refreshErr: Exception) {
+                    Log.w(TAG, "App Check forced refresh returned warning", refreshErr)
+                }
+                block()
+            } else {
+                throw e
+            }
+        }
     }
 
     /**
@@ -61,10 +91,12 @@ object AiStudioEngine {
             }
 
             val rawBitmap = withTimeout(60_000L) {
-                val response = model.generateContent(enrichedPrompt)
-                response.candidates.firstOrNull()
-                    ?.content?.parts?.filterIsInstance<ImagePart>()
-                    ?.firstOrNull()?.image
+                executeWithAppCheckRefresh {
+                    val response = model.generateContent(enrichedPrompt)
+                    response.candidates.firstOrNull()
+                        ?.content?.parts?.filterIsInstance<ImagePart>()
+                        ?.firstOrNull()?.image
+                }
             }
 
             if (rawBitmap == null) {
@@ -131,15 +163,17 @@ object AiStudioEngine {
     ): Result<OcrExtractionResult> = withContext(Dispatchers.IO) {
         try {
             val responseText = withTimeout(60_000L) {
-                val response = ocrVisionModel.generateContent(
-                    content {
-                        image(pageBitmap)
-                        text(
-                            "Extract all visible text from this PDF page verbatim, followed by a section titled '---SUMMARY---' with 3 concise executive bullet points."
-                        )
-                    }
-                )
-                response.text
+                executeWithAppCheckRefresh {
+                    val response = ocrVisionModel.generateContent(
+                        content {
+                            image(pageBitmap)
+                            text(
+                                "Extract all visible text from this PDF page verbatim, followed by a section titled '---SUMMARY---' with 3 concise executive bullet points."
+                            )
+                        }
+                    )
+                    response.text
+                }
             }
 
             if (responseText.isNullOrBlank()) {

@@ -11,27 +11,45 @@ import com.google.firebase.appcheck.recaptcha.RecaptchaAppCheckProviderFactory
 
 private const val TAG = "AppCheckInit"
 
+// App Check contract keys defined by the Firebase SDK and runtime harness
 private const val DEBUG_TOKEN_EXTRA = "FIREBASE_APPCHECK_DEBUG_TOKEN"
 private const val DEBUG_STORE_PREFIX = "com.google.firebase.appcheck.debug.store."
+private const val TOKEN_CACHE_STORE_PREFIX = "com.google.firebase.appcheck.store."
 private const val DEBUG_SECRET_KEY = "com.google.firebase.appcheck.debug.DEBUG_SECRET"
 private const val RECAPTCHA_SITE_KEY_RES = "recaptcha_site_key"
 
 fun configureAppCheck(context: Context, intent: Intent?) {
     try {
+        // 1. Ensure FirebaseApp is initialized
         if (FirebaseApp.getApps(context).isEmpty()) {
             FirebaseApp.initializeApp(context)
         }
 
+        val persistenceKey = FirebaseApp.getInstance().persistenceKey
+        val debugPrefs = context.getSharedPreferences(
+            "$DEBUG_STORE_PREFIX$persistenceKey",
+            Context.MODE_PRIVATE
+        )
+        val tokenCachePrefs = context.getSharedPreferences(
+            "$TOKEN_CACHE_STORE_PREFIX$persistenceKey",
+            Context.MODE_PRIVATE
+        )
+
         if (BuildConfig.DEBUG) {
+            // 2. Debug: Read debug token from Intent extra
             val debugToken = intent?.getStringExtra(DEBUG_TOKEN_EXTRA)
+                ?.trim()
+                ?.takeIf { it.isNotEmpty() }
 
             if (!debugToken.isNullOrEmpty()) {
-                val persistenceKey = FirebaseApp.getInstance().persistenceKey
-                val prefs = context.getSharedPreferences(
-                    "$DEBUG_STORE_PREFIX$persistenceKey",
-                    Context.MODE_PRIVATE
-                )
-                prefs.edit()
+                val previousSecret = debugPrefs.getString(DEBUG_SECRET_KEY, null)
+                // Clear any stale cached App Check token so a previously invalid token is not reused
+                if (previousSecret != debugToken) {
+                    tokenCachePrefs.edit().clear().commit()
+                }
+                // CRITICAL: MUST use commit() instead of apply() so the secret is written
+                // synchronously before DebugAppCheckProviderFactory reads it.
+                debugPrefs.edit()
                     .putString(DEBUG_SECRET_KEY, debugToken)
                     .commit()
                 Log.d(TAG, "App Check debug secret configured successfully.")
@@ -43,7 +61,13 @@ fun configureAppCheck(context: Context, intent: Intent?) {
                 DebugAppCheckProviderFactory.getInstance()
             )
             Log.d(TAG, "DebugAppCheckProviderFactory installed.")
+
+            if (!debugToken.isNullOrEmpty()) {
+                // Force an immediate fresh token exchange when a debug token is supplied
+                FirebaseAppCheck.getInstance().getAppCheckToken(true)
+            }
         } else {
+            // 3. Release: Look up recaptcha_site_key safely without throwing Resources.NotFoundException
             val resId = context.resources.getIdentifier(
                 RECAPTCHA_SITE_KEY_RES,
                 "string",

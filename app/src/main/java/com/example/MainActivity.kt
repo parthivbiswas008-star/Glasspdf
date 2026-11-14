@@ -44,6 +44,12 @@ class MainActivity : ComponentActivity() {
             GlassPdfProApp()
         }
     }
+
+    override fun onNewIntent(intent: android.content.Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        configureAppCheck(this, intent)
+    }
 }
 
 @Composable
