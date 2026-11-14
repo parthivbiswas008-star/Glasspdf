@@ -1,0 +1,6 @@
+{
+  "name": "GlassPDF Pro",
+  "description": "Liquid Glass PDF Reader, Normalized Touch Markup Editor, and AI Visual Stamp Studio with unlocked Pro tools.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

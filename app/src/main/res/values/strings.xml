@@ -1,0 +1,21 @@
+<resources>
+    <string name="app_name">GlassPDF Pro</string>
+    <string name="tab_recent">Recent</string>
+    <string name="tab_files">Files</string>
+    <string name="tab_tools">Tools</string>
+    <string name="tab_settings">Settings</string>
+    <string name="search_documents_hint">Search PDFs, text, or annotations…</string>
+    <string name="import_pdf_or_image">Import PDF or Image</string>
+    <string name="pro_unlocked_badge">100% Pro Unlocked</string>
+    <string name="ai_image_studio_title">AI Image &amp; Stamp Studio</string>
+    <string name="ai_image_studio_subtitle">Generate 1K, 2K &amp; 4K visual stamps and covers</string>
+    <string name="viewer_mode_read">Read</string>
+    <string name="viewer_mode_annotate">Annotate</string>
+    <string name="viewer_mode_draw">Draw</string>
+    <string name="viewer_mode_edit">Edit</string>
+    <string name="viewer_mode_sign">Sign</string>
+    <string name="viewer_mode_pages">Pages</string>
+    <string name="reflow_reader_title">Reflow Reader Mode</string>
+    <string name="signature_pad_title">Liquid Glass Signature Pad</string>
+    <string name="export_share_title">Export &amp; Native Share</string>
+</resources>
