@@ -131,4 +131,50 @@ class ExampleRobolectricTest {
         val gallery = SamplePdfSeeder.ensureStudioGalleryAssets(context)
         assertEquals(4, gallery.size)
     }
+
+    @Test
+    fun `acroFormFields roundTrip Text Checkbox and RadioGroup in snapshot and AppSettings persists preferredAiLanguage`() {
+        val fields = listOf(
+            com.example.model.PdfFormField(
+                id = "f_text",
+                pageIndex = 0,
+                label = "Client Name",
+                type = com.example.model.FormFieldType.TEXT,
+                bounds = NormalizedRect(0.1f, 0.2f, 0.4f, 0.05f),
+                textValue = "Studio Nord"
+            ),
+            com.example.model.PdfFormField(
+                id = "f_check",
+                pageIndex = 0,
+                label = "Approve Scope",
+                type = com.example.model.FormFieldType.CHECKBOX,
+                bounds = NormalizedRect(0.1f, 0.3f, 0.3f, 0.04f),
+                isChecked = true
+            ),
+            com.example.model.PdfFormField(
+                id = "f_radio",
+                pageIndex = 0,
+                label = "Billing Schedule",
+                type = com.example.model.FormFieldType.RADIO,
+                bounds = NormalizedRect(0.1f, 0.4f, 0.5f, 0.06f),
+                textValue = "Milestone",
+                options = listOf("Milestone", "Monthly", "Escrow")
+            )
+        )
+        val snap = DocumentAnnotationsSnapshot(formFields = fields)
+        val restored = DocumentAnnotationsSnapshot.fromJsonString(snap.toJsonString())
+
+        assertEquals(3, restored.formFields.size)
+        assertEquals("Studio Nord", restored.formFields[0].textValue)
+        assertTrue(restored.formFields[1].isChecked)
+        assertEquals(com.example.model.FormFieldType.RADIO, restored.formFields[2].type)
+        assertEquals("Milestone", restored.formFields[2].textValue)
+        assertEquals(listOf("Milestone", "Monthly", "Escrow"), restored.formFields[2].options)
+
+        val customSettings = AppSettings(preferredAiLanguage = com.example.model.AiLanguageOption.SPANISH)
+        val restoredSettings = AppSettings.fromJsonString(customSettings.toJsonString())
+        assertEquals(com.example.model.AiLanguageOption.SPANISH, restoredSettings.preferredAiLanguage)
+        assertEquals("ES", restoredSettings.preferredAiLanguage.shortCode)
+    }
 }
+

@@ -11,6 +11,7 @@ import android.util.Log
 import com.example.model.AiAspectRatioOption
 import com.example.model.AiImageModelOption
 import com.example.model.AiImageSizeOption
+import com.example.model.AiLanguageOption
 import com.example.model.EditorialStampPreset
 import com.example.model.NormalizedRect
 import com.example.model.PdfTextWord
@@ -465,8 +466,23 @@ object AiStudioEngine {
             val rawText = parts.firstOrNull()?.trim().orEmpty()
             val summary = parts.getOrNull(1)?.trim() ?: "• OCR text layer synchronized with page canvas."
 
-            val injectedWords = if (existingWords.isNotEmpty()) {
+            val hasRealWords = existingWords.isNotEmpty() && existingWords.none {
+                it.text.contains("•L") || it.text.startsWith("Page")
+            }
+
+            val injectedWords = if (hasRealWords) {
                 existingWords
+            } else if (existingWords.isNotEmpty()) {
+                // Map OCR tokens onto the existing bitmap-detected bounding boxes!
+                val ocrTokens = rawText.split(Regex("\\s+")).filter { it.isNotBlank() }
+                if (ocrTokens.isNotEmpty()) {
+                    existingWords.mapIndexed { idx, w ->
+                        val token = ocrTokens.getOrNull(idx) ?: w.text
+                        w.copy(text = token)
+                    }
+                } else {
+                    buildNormalizedWordsFromOcrText(rawText)
+                }
             } else {
                 buildNormalizedWordsFromOcrText(rawText)
             }
@@ -486,6 +502,102 @@ object AiStudioEngine {
         } catch (e: Exception) {
             Log.e(TAG, "Vision OCR failed", e)
             Result.failure(Exception(e.localizedMessage ?: "Vision OCR failed."))
+        }
+    }
+
+    /**
+     * Multimodal Document Context AI Assistant (`gemini-3.8-flash`).
+     * Uses the active PDF's extracted text, annotations, selected passage, and current page Bitmap,
+     * and responds in the user's preferred language (`preferredLanguage`).
+     */
+    suspend fun askDocumentAssistant(
+        userQuery: String,
+        preferredLanguage: AiLanguageOption,
+        documentTitle: String,
+        currentPageIndex: Int,
+        totalPages: Int,
+        documentContextText: String,
+        selectedTextPassage: String?,
+        currentPageBitmap: Bitmap?,
+        onStreamingChunk: (String) -> Unit
+    ): Result<String> = withContext(Dispatchers.IO) {
+        try {
+            val systemContextPrompt = buildString {
+                appendLine("You are the embedded Document AI Assistant inside GlassPDF Pro.")
+                appendLine("CRITICAL LANGUAGE INSTRUCTION: You MUST respond entirely in ${preferredLanguage.label} (${preferredLanguage.nativeName}).")
+                appendLine("Document Title: $documentTitle")
+                appendLine("Current Active Page: Page ${currentPageIndex + 1} of $totalPages")
+                if (!selectedTextPassage.isNullOrBlank()) {
+                    appendLine("User's Currently Selected Text on Page: \"$selectedTextPassage\"")
+                }
+                if (documentContextText.isNotBlank()) {
+                    appendLine("--- DOCUMENT TEXT, HIGHLIGHTS & FORM FIELDS CONTEXT ---")
+                    appendLine(documentContextText.take(7500))
+                    appendLine("--- END DOCUMENT CONTEXT ---")
+                }
+                appendLine("Answer the user's query accurately using the provided document text, annotations, and attached page image. Keep your answer clear, well-structured, and directly helpful. Respond in ${preferredLanguage.label} (${preferredLanguage.nativeName}).")
+                appendLine("User Query: $userQuery")
+            }
+
+            val finalAnswer = withTimeout(60_000L) {
+                executeWithAppCheckRefresh {
+                    val accumulated = StringBuilder()
+                    try {
+                        val streamFlow = if (currentPageBitmap != null && !currentPageBitmap.isRecycled) {
+                            ocrVisionModel.generateContentStream(
+                                content {
+                                    image(currentPageBitmap)
+                                    text(systemContextPrompt)
+                                }
+                            )
+                        } else {
+                            ocrVisionModel.generateContentStream(systemContextPrompt)
+                        }
+
+                        streamFlow.collect { chunk ->
+                            val part = chunk.text.orEmpty()
+                            if (part.isNotEmpty()) {
+                                accumulated.append(part)
+                                onStreamingChunk(accumulated.toString())
+                            }
+                        }
+                        accumulated.toString().trim()
+                    } catch (streamCancel: CancellationException) {
+                        throw streamCancel
+                    } catch (streamErr: Exception) {
+                        Log.w(TAG, "Streaming assistant fallback to unary generateContent", streamErr)
+                        val unaryResp = if (currentPageBitmap != null && !currentPageBitmap.isRecycled) {
+                            ocrVisionModel.generateContent(
+                                content {
+                                    image(currentPageBitmap)
+                                    text(systemContextPrompt)
+                                }
+                            )
+                        } else {
+                            ocrVisionModel.generateContent(systemContextPrompt)
+                        }
+                        val txt = unaryResp.text.orEmpty().trim()
+                        if (txt.isNotEmpty()) {
+                            onStreamingChunk(txt)
+                        }
+                        txt
+                    }
+                }
+            }
+
+            if (finalAnswer.isBlank()) {
+                Result.failure(IllegalStateException("AI Assistant returned an empty response."))
+            } else {
+                Result.success(finalAnswer)
+            }
+        } catch (e: TimeoutCancellationException) {
+            Log.e(TAG, "Document AI Assistant timed out", e)
+            Result.failure(Exception("AI Assistant timed out after 60 seconds. Please try again."))
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.e(TAG, "Document AI Assistant failed", e)
+            Result.failure(Exception(e.localizedMessage ?: "AI Assistant request failed."))
         }
     }
 

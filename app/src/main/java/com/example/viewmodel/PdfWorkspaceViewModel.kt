@@ -21,11 +21,13 @@ import com.example.engines.TextMarkupEngine
 import com.example.model.AiAspectRatioOption
 import com.example.model.AiImageModelOption
 import com.example.model.AiImageSizeOption
+import com.example.model.AiLanguageOption
 import com.example.model.AppSettings
 import com.example.model.DocumentAnnotationsSnapshot
 import com.example.model.DrawToolType
 import com.example.model.EditSubTool
 import com.example.model.EditorialStampPreset
+import com.example.model.FormFieldType
 import com.example.model.FreehandInkStroke
 import com.example.model.HomeTab
 import com.example.model.MarkupStyle
@@ -34,6 +36,7 @@ import com.example.model.NormalizedRect
 import com.example.model.PageScrollDirection
 import com.example.model.PdfCanvasPaperTint
 import com.example.model.PdfFormField
+import com.example.model.PdfTextWord
 import com.example.model.PlacedElement
 import com.example.model.PlacedElementKind
 import com.example.model.ProToolWorkflow
@@ -76,6 +79,24 @@ sealed interface OcrUiState {
     data object Scanning : OcrUiState
     data class Success(val extractedText: String, val summary: String) : OcrUiState
     data class Error(val message: String) : OcrUiState
+}
+
+sealed interface AiAssistantUiState {
+    data object Idle : AiAssistantUiState
+    data class Streaming(
+        val query: String,
+        val partialText: String,
+        val contextBadge: String
+    ) : AiAssistantUiState
+    data class Success(
+        val query: String,
+        val answerText: String,
+        val contextBadge: String
+    ) : AiAssistantUiState
+    data class Error(
+        val query: String,
+        val message: String
+    ) : AiAssistantUiState
 }
 
 class PdfWorkspaceViewModel(application: Application) : AndroidViewModel(application) {
@@ -261,6 +282,14 @@ class PdfWorkspaceViewModel(application: Application) : AndroidViewModel(applica
     private val _ocrUiState = MutableStateFlow<OcrUiState>(OcrUiState.Idle)
     val ocrUiState: StateFlow<OcrUiState> = _ocrUiState.asStateFlow()
 
+    // Floating Document AI Assistant State
+    private val _aiAssistantQuery = MutableStateFlow("")
+    val aiAssistantQuery: StateFlow<String> = _aiAssistantQuery.asStateFlow()
+
+    private val _aiAssistantUiState = MutableStateFlow<AiAssistantUiState>(AiAssistantUiState.Idle)
+    val aiAssistantUiState: StateFlow<AiAssistantUiState> = _aiAssistantUiState.asStateFlow()
+    private var aiAssistantJob: Job? = null
+
     init {
         val db = GlassPdfDatabase.getInstance(application)
         repository = GlassPdfRepository(db.glassPdfDao())
@@ -359,6 +388,166 @@ class PdfWorkspaceViewModel(application: Application) : AndroidViewModel(applica
 
     fun setDefaultAuthorName(author: String) {
         updateSettings { it.copy(defaultAuthorName = author.ifBlank { "Studio Architect" }) }
+    }
+
+    fun setPreferredAiLanguage(language: AiLanguageOption) {
+        updateSettings { it.copy(preferredAiLanguage = language) }
+        showDynamicToast("AI Language", "${language.label} (${language.nativeName})")
+    }
+
+    fun setAiAssistantQuery(query: String) {
+        _aiAssistantQuery.value = query
+    }
+
+    fun dismissAiAssistantReply() {
+        aiAssistantJob?.cancel()
+        _aiAssistantUiState.value = AiAssistantUiState.Idle
+    }
+
+    fun askDocumentAiAssistant(customQuery: String? = null) {
+        val doc = _activeDocument.value ?: documents.value.firstOrNull() ?: return
+        val rawQuery = (customQuery ?: _aiAssistantQuery.value).trim()
+        if (rawQuery.isBlank()) {
+            showDynamicToast("Enter a question for the AI Assistant")
+            return
+        }
+        if (customQuery != null) {
+            _aiAssistantQuery.value = ""
+        } else {
+            _aiAssistantQuery.value = ""
+        }
+
+        val pageIdx = _currentPageIndex.value
+        val snap = _activeSnapshot.value
+        val selectedPassage = _currentTouchSelection.value?.selectedText
+            ?: _selectedExistingMarkup.value?.selectedText
+        val lang = _appSettings.value.preferredAiLanguage
+        val pageBmp = _pageBitmaps.value[pageIdx]
+
+        val contextBadge = buildString {
+            append("P.${pageIdx + 1}/${doc.pageCount}")
+            if (!selectedPassage.isNullOrBlank()) {
+                append(" • Selection")
+            }
+            if (snap.formFields.isNotEmpty()) {
+                append(" • ${snap.formFields.size} Fields")
+            }
+            append(" • ${lang.shortCode}")
+        }
+
+        aiAssistantJob?.cancel()
+        aiAssistantJob = viewModelScope.launch {
+            _aiAssistantUiState.value = AiAssistantUiState.Streaming(
+                query = rawQuery,
+                partialText = "Reading document context (${lang.label})…",
+                contextBadge = contextBadge
+            )
+
+            // Build structured document context from all indexed pages, highlights, sticky notes, and AcroForm fields
+            val docContext = withContext(Dispatchers.Default) {
+                buildString {
+                    appendLine("Active Page: Page ${pageIdx + 1} of ${doc.pageCount}")
+                    val activeWords = snap.pageWords[pageIdx].orEmpty()
+                    if (activeWords.isNotEmpty()) {
+                        appendLine("\n--- CURRENT PAGE (${pageIdx + 1}) TEXT ---")
+                        val lines = activeWords.groupBy { it.lineIndex }.toSortedMap()
+                        lines.forEach { (_, words) ->
+                            appendLine(words.joinToString(" ") { it.text })
+                        }
+                    }
+
+                    // Other pages summary
+                    val otherPages = snap.pageWords.keys.sorted().filter { it != pageIdx }
+                    if (otherPages.isNotEmpty()) {
+                        appendLine("\n--- OTHER PAGES IN DOCUMENT ---")
+                        for (p in otherPages) {
+                            val pWords = snap.pageWords[p].orEmpty()
+                            if (pWords.isNotEmpty()) {
+                                val textSnippet = pWords.joinToString(" ") { it.text }.take(900)
+                                appendLine("Page ${p + 1}: $textSnippet")
+                            }
+                        }
+                    }
+
+                    // User highlights & notes
+                    if (snap.markups.isNotEmpty()) {
+                        appendLine("\n--- USER HIGHLIGHTS & NOTES ---")
+                        snap.markups.take(15).forEach { m ->
+                            append("• [P.${m.pageIndex + 1} ${m.style.label}] \"${m.selectedText}\"")
+                            if (m.note.isNotBlank()) append(" (Note: ${m.note})")
+                            appendLine()
+                        }
+                    }
+
+                    // Sticky notes & text boxes
+                    if (snap.placedElements.isNotEmpty()) {
+                        appendLine("\n--- PLACED STICKY NOTES & ANNOTATIONS ---")
+                        snap.placedElements.take(12).forEach { el ->
+                            appendLine("• [P.${el.pageIndex + 1} ${el.kind.label}] ${el.textContent}")
+                        }
+                    }
+
+                    // Interactive AcroForm fields
+                    if (snap.formFields.isNotEmpty()) {
+                        appendLine("\n--- INTERACTIVE ACROFORM FIELDS ---")
+                        snap.formFields.forEach { f ->
+                            val valueStr = when (f.type) {
+                                FormFieldType.CHECKBOX -> if (f.isChecked) "Checked (Yes)" else "Unchecked (No)"
+                                FormFieldType.RADIO -> f.textValue.ifBlank { "Unselected" } + " (Options: ${f.options.joinToString("/")})"
+                                else -> f.textValue.ifBlank { "Empty" }
+                            }
+                            appendLine("• [P.${f.pageIndex + 1} ${f.type.name}] ${f.label}: $valueStr")
+                        }
+                    }
+                }
+            }
+
+            val result = AiStudioEngine.askDocumentAssistant(
+                userQuery = rawQuery,
+                documentTitle = doc.title,
+                currentPageIndex = pageIdx,
+                totalPages = doc.pageCount,
+                documentContextText = docContext,
+                selectedTextPassage = selectedPassage,
+                preferredLanguage = lang,
+                currentPageBitmap = pageBmp,
+                onStreamingChunk = { partial ->
+                    _aiAssistantUiState.value = AiAssistantUiState.Streaming(
+                        query = rawQuery,
+                        partialText = partial,
+                        contextBadge = contextBadge
+                    )
+                }
+            )
+
+            result.fold(
+                onSuccess = { finalAnswer ->
+                    _aiAssistantUiState.value = AiAssistantUiState.Success(
+                        query = rawQuery,
+                        answerText = finalAnswer,
+                        contextBadge = contextBadge
+                    )
+                },
+                onFailure = { err ->
+                    _aiAssistantUiState.value = AiAssistantUiState.Error(
+                        query = rawQuery,
+                        message = err.message ?: "Unable to reach Document AI Assistant."
+                    )
+                }
+            )
+        }
+    }
+
+    fun pinAiReplyAsStickyNote(replyText: String) {
+        if (replyText.isBlank()) return
+        val pageIdx = _currentPageIndex.value
+        placeTextOrStickyElement(
+            pageIndex = pageIdx,
+            tapPoint = NormalizedPoint(0.52f, 0.34f),
+            kind = PlacedElementKind.STICKY_NOTE,
+            textContent = replyText.take(240)
+        )
+        showDynamicToast("AI Reply pinned as Sticky Note", "Page ${pageIdx + 1}")
     }
 
     fun reseedSampleWorkspace() {
@@ -560,6 +749,9 @@ class PdfWorkspaceViewModel(application: Application) : AndroidViewModel(applica
             val count = doc.pageCount.coerceAtLeast(1)
             val targetWidth = _appSettings.value.renderQuality.targetWidthPx
             val map = mutableMapOf<Int, Bitmap>()
+            val updatedWordsMap = snapshot.pageWords.toMutableMap()
+            var wordsChanged = false
+
             for (idx in 0 until count) {
                 val rot = snapshot.pageRotations[idx] ?: 0
                 val cacheKey = "${doc.id}_${file.lastModified()}_p${idx}_r${rot}_w${targetWidth}"
@@ -574,7 +766,24 @@ class PdfWorkspaceViewModel(application: Application) : AndroidViewModel(applica
                 if (bmp != null) {
                     map[idx] = bmp
                     _pageBitmaps.value = map.toMap()
+
+                    // Automatically detect text lines & word bounding boxes on imported PDFs that lack pre-indexed words!
+                    if (updatedWordsMap[idx].isNullOrEmpty()) {
+                        val detectedWords = PdfProEngine.detectTextWordsFromPageBitmap(bmp, idx)
+                        if (detectedWords.isNotEmpty()) {
+                            updatedWordsMap[idx] = detectedWords
+                            wordsChanged = true
+                        }
+                    }
                 }
+            }
+
+            if (wordsChanged && _activeDocument.value?.id == doc.id) {
+                val enrichedSnapshot = _activeSnapshot.value.copy(pageWords = updatedWordsMap.toMap())
+                _activeSnapshot.value = enrichedSnapshot
+                val updatedDoc = doc.copy(annotationsJson = enrichedSnapshot.toJsonString())
+                repository.upsertDocument(updatedDoc)
+                _activeDocument.value = updatedDoc
             }
         }
     }
@@ -1014,6 +1223,187 @@ class PdfWorkspaceViewModel(application: Application) : AndroidViewModel(applica
         }
         pushSnapshotMutation(current.copy(formFields = updatedFields))
         showDynamicToast("Form field updated")
+    }
+
+    fun updateFormFieldInDocument(
+        doc: PdfDocumentEntity,
+        fieldId: String,
+        newText: String? = null,
+        newChecked: Boolean? = null
+    ) {
+        if (_activeDocument.value?.id == doc.id) {
+            updateFormFieldValue(fieldId, newText, newChecked)
+            return
+        }
+        viewModelScope.launch(Dispatchers.IO) {
+            val snap = DocumentAnnotationsSnapshot.fromJsonString(doc.annotationsJson)
+            val updatedFields = snap.formFields.map { field ->
+                if (field.id == fieldId) {
+                    field.copy(
+                        textValue = newText ?: field.textValue,
+                        isChecked = newChecked ?: field.isChecked
+                    )
+                } else field
+            }
+            val updatedSnap = snap.copy(formFields = updatedFields)
+            repository.upsertDocument(doc.copy(annotationsJson = updatedSnap.toJsonString()))
+            withContext(Dispatchers.Main) {
+                showDynamicToast("Saved AcroForm field")
+            }
+        }
+    }
+
+    fun addAcroFormField(
+        targetDoc: PdfDocumentEntity? = _activeDocument.value,
+        pageIndex: Int = _currentPageIndex.value,
+        type: FormFieldType,
+        label: String,
+        defaultValue: String = "",
+        options: List<String> = emptyList()
+    ) {
+        val doc = targetDoc ?: documents.value.firstOrNull() ?: return
+        val cleanLabel = label.trim().ifBlank {
+            when (type) {
+                FormFieldType.TEXT -> "Text Field"
+                FormFieldType.CHECKBOX -> "Confirmation Checkbox"
+                FormFieldType.RADIO -> "Radio Option Group"
+                FormFieldType.DROPDOWN -> "Selection Dropdown"
+            }
+        }
+        val cleanOptions = if (options.isNotEmpty()) {
+            options
+        } else {
+            when (type) {
+                FormFieldType.RADIO -> listOf("Approved", "Pending", "Revision")
+                FormFieldType.DROPDOWN -> listOf("Standard", "Priority", "Archive")
+                else -> emptyList()
+            }
+        }
+
+        val currentSnap = if (_activeDocument.value?.id == doc.id) {
+            _activeSnapshot.value
+        } else {
+            DocumentAnnotationsSnapshot.fromJsonString(doc.annotationsJson)
+        }
+
+        val existingOnPage = currentSnap.formFields.count { it.pageIndex == pageIndex }
+        val yOffset = (0.24f + (existingOnPage % 6) * 0.088f).coerceIn(0.12f, 0.82f)
+        val width = when (type) {
+            FormFieldType.CHECKBOX -> 0.42f
+            FormFieldType.RADIO -> 0.56f
+            else -> 0.48f
+        }
+        val height = when (type) {
+            FormFieldType.CHECKBOX -> 0.045f
+            FormFieldType.RADIO -> 0.062f
+            else -> 0.056f
+        }
+
+        val newField = PdfFormField(
+            id = "acro_${System.nanoTime()}",
+            pageIndex = pageIndex.coerceIn(0, (doc.pageCount - 1).coerceAtLeast(0)),
+            label = cleanLabel,
+            type = type,
+            bounds = NormalizedRect(0.24f, yOffset, width, height),
+            textValue = if (type == FormFieldType.RADIO && defaultValue.isBlank()) cleanOptions.firstOrNull().orEmpty() else defaultValue,
+            isChecked = type == FormFieldType.CHECKBOX && defaultValue.equals("true", ignoreCase = true),
+            options = cleanOptions
+        )
+
+        if (_activeDocument.value?.id == doc.id) {
+            pushSnapshotMutation(currentSnap.copy(formFields = currentSnap.formFields + newField))
+            showDynamicToast("Added ${type.name} field", "Page ${pageIndex + 1}")
+        } else {
+            viewModelScope.launch(Dispatchers.IO) {
+                val updatedSnap = currentSnap.copy(formFields = currentSnap.formFields + newField)
+                val updatedDoc = doc.copy(annotationsJson = updatedSnap.toJsonString())
+                repository.upsertDocument(updatedDoc)
+                withContext(Dispatchers.Main) {
+                    showDynamicToast("Added ${cleanLabel}", doc.title.take(16))
+                }
+            }
+        }
+    }
+
+    fun deleteAcroFormField(fieldId: String, targetDoc: PdfDocumentEntity? = _activeDocument.value) {
+        val doc = targetDoc ?: return
+        if (_activeDocument.value?.id == doc.id) {
+            val current = _activeSnapshot.value
+            pushSnapshotMutation(current.copy(formFields = current.formFields.filterNot { it.id == fieldId }))
+            showDynamicToast("Removed form field")
+        } else {
+            viewModelScope.launch(Dispatchers.IO) {
+                val snap = DocumentAnnotationsSnapshot.fromJsonString(doc.annotationsJson)
+                val updatedSnap = snap.copy(formFields = snap.formFields.filterNot { it.id == fieldId })
+                repository.upsertDocument(doc.copy(annotationsJson = updatedSnap.toJsonString()))
+                withContext(Dispatchers.Main) {
+                    showDynamicToast("Removed form field")
+                }
+            }
+        }
+    }
+
+    fun seedStandardAcroFormFieldsOnDocument(doc: PdfDocumentEntity) {
+        val currentSnap = if (_activeDocument.value?.id == doc.id) {
+            _activeSnapshot.value
+        } else {
+            DocumentAnnotationsSnapshot.fromJsonString(doc.annotationsJson)
+        }
+        val pageIdx = if (_activeDocument.value?.id == doc.id) _currentPageIndex.value else 0
+        val newFields = listOf(
+            PdfFormField(
+                id = "field_signatory_${System.nanoTime()}",
+                pageIndex = pageIdx,
+                label = "Authorized Signatory Name",
+                type = FormFieldType.TEXT,
+                bounds = NormalizedRect(0.08f, 0.62f, 0.44f, 0.055f),
+                textValue = _appSettings.value.defaultAuthorName
+            ),
+            PdfFormField(
+                id = "field_approval_radio_${System.nanoTime()}",
+                pageIndex = pageIdx,
+                label = "Review Disposition (Radio Group)",
+                type = FormFieldType.RADIO,
+                bounds = NormalizedRect(0.08f, 0.69f, 0.56f, 0.060f),
+                textValue = "Approved",
+                options = listOf("Approved", "Conditional", "Revise")
+            ),
+            PdfFormField(
+                id = "field_terms_chk_${System.nanoTime()}",
+                pageIndex = pageIdx,
+                label = "Confirm Compliance & Sign-Off",
+                type = FormFieldType.CHECKBOX,
+                bounds = NormalizedRect(0.08f, 0.76f, 0.44f, 0.044f),
+                isChecked = true
+            )
+        )
+        val mergedFields = currentSnap.formFields + newFields
+        if (_activeDocument.value?.id == doc.id) {
+            pushSnapshotMutation(currentSnap.copy(formFields = mergedFields))
+            showDynamicToast("Detected & added 3 AcroForm fields", "Page ${pageIdx + 1}")
+        } else {
+            viewModelScope.launch(Dispatchers.IO) {
+                val updatedSnap = currentSnap.copy(formFields = mergedFields)
+                val updatedDoc = doc.copy(annotationsJson = updatedSnap.toJsonString())
+                repository.upsertDocument(updatedDoc)
+                withContext(Dispatchers.Main) {
+                    showDynamicToast("Added AcroForm block to ${doc.title.take(15)}")
+                }
+            }
+        }
+    }
+
+    fun openDocumentInFillAndSignMode(doc: PdfDocumentEntity) {
+        _activeProWorkflow.value = null
+        _viewerDockMode.value = ViewerDockMode.SIGN
+        requestOpenDocument(doc)
+    }
+
+    fun syncCurrentPageWithVisionOcr() {
+        val doc = _activeDocument.value ?: return
+        val pageIdx = _currentPageIndex.value
+        showDynamicToast("Syncing Page ${pageIdx + 1} with Vision OCR…")
+        executeVisionOcrScan(doc, pageIdx)
     }
 
     // ========================================================================

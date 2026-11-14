@@ -459,8 +459,17 @@ object SamplePdfSeeder {
                 pageIndex = 0,
                 label = "Include Expedited Structural Glazing Review",
                 type = FormFieldType.CHECKBOX,
-                bounds = NormalizedRect(0.09f, 0.76f, 0.82f, 0.048f),
+                bounds = NormalizedRect(0.09f, 0.74f, 0.82f, 0.046f),
                 isChecked = true
+            ),
+            PdfFormField(
+                id = "field_payment_schedule",
+                pageIndex = 0,
+                label = "Billing Schedule (Radio Group)",
+                type = FormFieldType.RADIO,
+                bounds = NormalizedRect(0.09f, 0.80f, 0.82f, 0.062f),
+                textValue = "Milestone",
+                options = listOf("Milestone", "Monthly", "Escrow")
             ),
             PdfFormField(
                 id = "field_signer_title",

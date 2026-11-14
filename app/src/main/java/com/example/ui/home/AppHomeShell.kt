@@ -87,11 +87,14 @@ import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.material.icons.filled.FactCheck
+import androidx.compose.material.icons.filled.Language
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.R
 import com.example.data.local.PdfDocumentEntity
 import com.example.data.local.SavedSignatureEntity
 import com.example.engines.PdfProEngine
+import com.example.model.AiLanguageOption
 import com.example.model.AppSettings
 import com.example.model.DocumentAnnotationsSnapshot
 import com.example.model.HomeTab
@@ -208,6 +211,7 @@ fun AppHomeShell(
                         onSelectScrollDirection = { viewModel.setPageScrollDirection(it) },
                         onSelectPaperTint = { viewModel.setPdfCanvasPaperTint(it) },
                         onSelectRenderQuality = { viewModel.setRenderQualityMode(it) },
+                        onSelectPreferredAiLanguage = { viewModel.setPreferredAiLanguage(it) },
                         onToggleInstantHighlight = { viewModel.setInstantHighlightOnDrag(it) },
                         onToggleAutoCopy = { viewModel.setAutoCopyHighlightedText(it) },
                         onToggleKeepScreenAwake = { viewModel.setKeepScreenAwake(it) },
@@ -440,6 +444,14 @@ private fun RecentDocumentsTab(
                     .horizontalScroll(rememberScrollState()),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
+                GlassPill(
+                    onClick = { onLaunchWorkflow(ProToolWorkflow.FILL_AND_SIGN) },
+                    modifier = Modifier.testTag("quick_fill_sign_pill")
+                ) {
+                    Icon(Icons.Default.FactCheck, null, tint = glass.goldBadge, modifier = Modifier.size(17.dp))
+                    Spacer(Modifier.width(6.dp))
+                    Text("Fill & Sign", style = MaterialTheme.typography.labelLarge, color = glass.primaryText)
+                }
                 GlassPill(
                     onClick = { onLaunchWorkflow(ProToolWorkflow.PASSWORD_PROTECT) },
                     modifier = Modifier.testTag("quick_password_pill")
@@ -963,6 +975,7 @@ private fun ProWorkflowGlassCard(
     val glass = LocalLiquidGlass.current
     val (icon, gradient) = when (workflow) {
         ProToolWorkflow.AI_IMAGE_STUDIO -> Icons.Default.AutoAwesome to ToolGradientAiStudio
+        ProToolWorkflow.FILL_AND_SIGN -> Icons.Default.FactCheck to ToolGradientAiStudio
         ProToolWorkflow.MERGE_PDFS -> Icons.AutoMirrored.Filled.MergeType to ToolGradientMerge
         ProToolWorkflow.SPLIT_EXTRACT -> Icons.AutoMirrored.Filled.CallSplit to ToolGradientSplit
         ProToolWorkflow.IMAGES_TO_PDF -> Icons.Default.Image to ToolGradientImagesToPdf
@@ -1039,6 +1052,7 @@ private fun SettingsVaultTab(
     onSelectScrollDirection: (PageScrollDirection) -> Unit,
     onSelectPaperTint: (PdfCanvasPaperTint) -> Unit,
     onSelectRenderQuality: (RenderQualityMode) -> Unit,
+    onSelectPreferredAiLanguage: (AiLanguageOption) -> Unit = {},
     onToggleInstantHighlight: (Boolean) -> Unit,
     onToggleAutoCopy: (Boolean) -> Unit,
     onToggleKeepScreenAwake: (Boolean) -> Unit,
@@ -1109,6 +1123,63 @@ private fun SettingsVaultTab(
                             ) {
                                 Text(
                                     text = mode.label.split(" ").first(),
+                                    style = MaterialTheme.typography.labelLarge,
+                                    color = glass.primaryText
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // 1B. Preferred AI Assistant Language (Persisted & Synced with Viewer AI Bar)
+        item {
+            GlassSurface(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag("settings_ai_language_card"),
+                shape = RoundedCornerShape(26.dp)
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(18.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        Icon(Icons.Default.Language, null, tint = glass.goldBadge)
+                        Column {
+                            Text(
+                                text = "Preferred AI Assistant Language",
+                                style = MaterialTheme.typography.titleMedium,
+                                color = glass.primaryText
+                            )
+                            Text(
+                                text = "Document AI responses & summaries will default to ${appSettings.preferredAiLanguage.label} (${appSettings.preferredAiLanguage.nativeName})",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = glass.secondaryText
+                            )
+                        }
+                    }
+
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        AiLanguageOption.entries.forEach { lang ->
+                            GlassPill(
+                                onClick = { onSelectPreferredAiLanguage(lang) },
+                                isSelected = appSettings.preferredAiLanguage == lang,
+                                modifier = Modifier.testTag("setting_ai_lang_${lang.name}")
+                            ) {
+                                Text(
+                                    text = "${lang.label} (${lang.shortCode})",
                                     style = MaterialTheme.typography.labelLarge,
                                     color = glass.primaryText
                                 )

@@ -26,19 +26,27 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Comment
 import androidx.compose.material.icons.automirrored.filled.Notes
 import androidx.compose.material.icons.automirrored.filled.ShortText
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.ArrowDropDown
+import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.CheckBox
 import androidx.compose.material.icons.filled.CheckBoxOutlineBlank
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.DeleteOutline
+import androidx.compose.material.icons.filled.DocumentScanner
+import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.EditNote
 import androidx.compose.material.icons.filled.FormatStrikethrough
 import androidx.compose.material.icons.filled.FormatUnderlined
 import androidx.compose.material.icons.filled.Highlight
+import androidx.compose.material.icons.filled.RadioButtonChecked
+import androidx.compose.material.icons.filled.RadioButtonUnchecked
 import androidx.compose.material.icons.filled.Remove
 import androidx.compose.material.icons.filled.Waves
 import androidx.compose.material3.Icon
@@ -135,6 +143,7 @@ fun PdfPageLayer(
     onTapInEditOrSignMode: (NormalizedPoint) -> Unit,
     onPlaceStickyNoteInReadMode: (NormalizedPoint) -> Unit = {},
     onEditFormField: (PdfFormField) -> Unit,
+    onSelectRadioOption: (PdfFormField, String) -> Unit = { _, _ -> },
     onMovePlacedElement: (String, Float, Float) -> Unit = { _, _, _ -> },
     onScalePlacedElement: (String, Float) -> Unit = { _, _ -> },
     onDeletePlacedElement: (String) -> Unit,
@@ -645,7 +654,7 @@ fun PdfPageLayer(
             }
         }
 
-        // LAYER 3A: Interactive AcroForm Overlays
+        // LAYER 3A: Interactive AcroForm Overlays (PDFTextField, PDFCheckBox, PDFRadioGroup, PDFDropdown)
         pageFields.forEach { field ->
             val leftPx = (field.bounds.x * pageWidthPx).roundToInt()
             val topPx = (field.bounds.y * pageHeightPx).roundToInt()
@@ -657,47 +666,173 @@ fun PdfPageLayer(
                     .offset { IntOffset(leftPx, topPx) }
                     .width(widthDp)
                     .height(heightDp)
-                    .clip(RoundedCornerShape(6.dp))
-                    .background(Color(0xD9EAE4D7))
-                    .border(1.dp, Color(0xFF355266).copy(alpha = 0.55f), RoundedCornerShape(6.dp))
+                    .shadow(4.dp, RoundedCornerShape(8.dp))
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(Color(0xEBFAF6ED))
+                    .border(
+                        width = 1.2.dp,
+                        color = if (field.isChecked || field.textValue.isNotBlank()) Color(0xFF355266) else Color(0xFF8C7A5B),
+                        shape = RoundedCornerShape(8.dp)
+                    )
                     .clickable { onEditFormField(field) }
-                    .padding(horizontal = 8.dp)
+                    .padding(horizontal = 8.dp, vertical = 3.dp)
                     .testTag("acroform_field_${field.id}"),
                 contentAlignment = Alignment.CenterStart
             ) {
-                if (field.type == FormFieldType.CHECKBOX) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Icon(
-                            imageVector = if (field.isChecked) Icons.Default.CheckBox else Icons.Default.CheckBoxOutlineBlank,
-                            contentDescription = field.label,
-                            tint = Color(0xFF355266),
-                            modifier = Modifier.size(16.dp)
-                        )
-                        Spacer(modifier = Modifier.width(6.dp))
-                        Text(
-                            text = field.label,
-                            style = MaterialTheme.typography.labelSmall,
-                            color = Color(0xFF1C1E21),
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
+                when (field.type) {
+                    FormFieldType.CHECKBOX -> {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Icon(
+                                    imageVector = if (field.isChecked) Icons.Default.CheckBox else Icons.Default.CheckBoxOutlineBlank,
+                                    contentDescription = field.label,
+                                    tint = if (field.isChecked) Color(0xFF355266) else Color(0xFF5A6067),
+                                    modifier = Modifier.size(17.dp)
+                                )
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text(
+                                    text = field.label,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = Color(0xFF1C1E21),
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                            Text(
+                                text = if (field.isChecked) "YES" else "NO",
+                                fontFamily = JetBrainsTabularFamily,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = if (field.isChecked) Color(0xFF355266) else Color(0xFF7A8087)
+                            )
+                        }
                     }
-                } else {
-                    Column {
-                        Text(
-                            text = field.label.uppercase(),
-                            fontFamily = JetBrainsTabularFamily,
-                            style = MaterialTheme.typography.labelSmall,
-                            color = Color(0xFF5A6067),
-                            maxLines = 1
-                        )
-                        Text(
-                            text = field.textValue.ifBlank { "Tap to fill…" },
-                            style = MaterialTheme.typography.labelLarge,
-                            color = Color(0xFF1C1E21),
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
+
+                    FormFieldType.RADIO -> {
+                        val radioOpts = field.options.ifEmpty { listOf("Option A", "Option B") }
+                        Column(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalArrangement = Arrangement.Center
+                        ) {
+                            Text(
+                                text = field.label.uppercase(),
+                                fontFamily = JetBrainsTabularFamily,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = Color(0xFF5A6067),
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .horizontalScroll(rememberScrollState()),
+                                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                radioOpts.forEach { opt ->
+                                    val isSelected = field.textValue.equals(opt, ignoreCase = true)
+                                    Row(
+                                        modifier = Modifier
+                                            .clip(RoundedCornerShape(50))
+                                            .background(
+                                                if (isSelected) Color(0xFF355266).copy(alpha = 0.16f)
+                                                else Color.Transparent
+                                            )
+                                            .clickable {
+                                                onSelectRadioOption(field, opt)
+                                            }
+                                            .padding(horizontal = 5.dp, vertical = 1.dp)
+                                            .testTag("acroform_radio_${field.id}_$opt"),
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Icon(
+                                            imageVector = if (isSelected) Icons.Default.RadioButtonChecked else Icons.Default.RadioButtonUnchecked,
+                                            contentDescription = opt,
+                                            tint = if (isSelected) Color(0xFF355266) else Color(0xFF6E757C),
+                                            modifier = Modifier.size(13.dp)
+                                        )
+                                        Spacer(modifier = Modifier.width(3.dp))
+                                        Text(
+                                            text = opt,
+                                            style = MaterialTheme.typography.labelSmall,
+                                            fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
+                                            color = Color(0xFF1C1E21),
+                                            maxLines = 1
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    FormFieldType.DROPDOWN -> {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = field.label.uppercase(),
+                                    fontFamily = JetBrainsTabularFamily,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = Color(0xFF5A6067),
+                                    maxLines = 1
+                                )
+                                Text(
+                                    text = field.textValue.ifBlank { field.options.firstOrNull() ?: "Select option…" },
+                                    style = MaterialTheme.typography.labelLarge,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = Color(0xFF1C1E21),
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                            Icon(
+                                imageVector = Icons.Default.ArrowDropDown,
+                                contentDescription = "Dropdown",
+                                tint = Color(0xFF355266),
+                                modifier = Modifier.size(18.dp)
+                            )
+                        }
+                    }
+
+                    FormFieldType.TEXT -> {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = field.label.uppercase(),
+                                    fontFamily = JetBrainsTabularFamily,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = Color(0xFF5A6067),
+                                    maxLines = 1
+                                )
+                                Text(
+                                    text = field.textValue.ifBlank { "Tap to enter text…" },
+                                    style = MaterialTheme.typography.labelLarge,
+                                    color = if (field.textValue.isBlank()) Color(0xFF7B828A) else Color(0xFF1C1E21),
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                            Icon(
+                                imageVector = Icons.Default.Edit,
+                                contentDescription = "Edit text field",
+                                tint = Color(0xFF355266).copy(alpha = 0.75f),
+                                modifier = Modifier.size(14.dp)
+                            )
+                        }
                     }
                 }
             }
@@ -915,6 +1050,8 @@ fun TouchSelectionGlassPill(
     onCopyText: () -> Unit,
     onAddOrEditNote: () -> Unit,
     onDropStickyNoteAtSelection: () -> Unit = {},
+    onAskAiAboutSelection: () -> Unit = {},
+    onSyncVisionOcr: () -> Unit = {},
     onDeleteExistingMarkup: () -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -980,8 +1117,9 @@ fun TouchSelectionGlassPill(
                 }
             }
 
-            // Row 2: Style Toggles (Highlight, Underline, Strikethrough, Squiggly) + Copy + Note + Sticky Note + Delete
+            // Row 2: Style Toggles (Highlight, Underline, Strikethrough, Squiggly) + Copy + Note + Sticky Note + Ask AI + Delete
             Row(
+                modifier = Modifier.horizontalScroll(rememberScrollState()),
                 horizontalArrangement = Arrangement.spacedBy(6.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
@@ -1011,6 +1149,17 @@ fun TouchSelectionGlassPill(
                     selected = currentStyle == MarkupStyle.SQUIGGLY,
                     onClick = { onSelectStyleAndCommit(MarkupStyle.SQUIGGLY) }
                 )
+
+                GlassPill(
+                    onClick = onAskAiAboutSelection,
+                    contentPaddingHorizontal = 9.dp,
+                    contentPaddingVertical = 7.dp,
+                    modifier = Modifier.testTag("selection_ask_ai_button")
+                ) {
+                    Icon(Icons.Default.AutoAwesome, "Ask AI", tint = glass.goldBadge, modifier = Modifier.size(15.dp))
+                    Spacer(Modifier.width(3.dp))
+                    Text("Ask AI", style = MaterialTheme.typography.labelSmall, color = glass.primaryText)
+                }
 
                 GlassPill(
                     onClick = onCopyText,
@@ -1044,6 +1193,17 @@ fun TouchSelectionGlassPill(
                         Icon(Icons.AutoMirrored.Filled.Comment, "Sticky Note", tint = glass.goldBadge, modifier = Modifier.size(15.dp))
                         Spacer(Modifier.width(3.dp))
                         Text("Sticky", style = MaterialTheme.typography.labelSmall, color = glass.primaryText)
+                    }
+
+                    GlassPill(
+                        onClick = onSyncVisionOcr,
+                        contentPaddingHorizontal = 9.dp,
+                        contentPaddingVertical = 7.dp,
+                        modifier = Modifier.testTag("selection_sync_ocr_button")
+                    ) {
+                        Icon(Icons.Default.DocumentScanner, "Sync OCR", tint = glass.accent, modifier = Modifier.size(15.dp))
+                        Spacer(Modifier.width(3.dp))
+                        Text("OCR", style = MaterialTheme.typography.labelSmall, color = glass.primaryText)
                     }
                 }
 

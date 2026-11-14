@@ -32,13 +32,17 @@ object TextMarkupEngine {
      * Given a drag start and current/end point in normalized [0..1] page space,
      * extracts all words in reading order between the start and end anchors (or intersecting box),
      * merges fragmented word boxes per visual line, and computes the floating pill anchor.
+     * For imported/scanned PDFs where no words are indexed at the drag region, synthesizes clean
+     * normalized line highlight rects along the drag trajectory so highlighting always works.
      */
     fun computeTouchSelection(
         pageWords: List<PdfTextWord>,
         startPoint: NormalizedPoint,
         endPoint: NormalizedPoint
     ): SelectionResult? {
-        if (pageWords.isEmpty()) return null
+        if (pageWords.isEmpty()) {
+            return buildFallbackSelectionForDrag(startPoint, endPoint)
+        }
 
         val minX = min(startPoint.x, endPoint.x)
         val maxX = max(startPoint.x, endPoint.x)
@@ -70,25 +74,31 @@ object TextMarkupEngine {
         }
 
         return buildSelectionResultFromWords(selectedWords)
+            ?: buildFallbackSelectionForDrag(startPoint, endPoint)
     }
 
     /**
      * Selects the tapped word (or full line if `selectFullLine == true`) when the user taps
-     * or long-presses on text.
+     * or long-presses on text. If `pageWords` is empty (e.g., newly imported PDF before OCR),
+     * synthesizes a clean selectable word/line span at the tap coordinate.
      */
     fun selectWordOrLineAtPoint(
         pageWords: List<PdfTextWord>,
         tapPoint: NormalizedPoint,
         selectFullLine: Boolean = false
     ): SelectionResult? {
-        if (pageWords.isEmpty()) return null
+        if (pageWords.isEmpty()) {
+            return buildFallbackSelectionForTap(tapPoint, selectFullLine)
+        }
         val orderedWords = pageWords.sortedWith(
             compareBy<PdfTextWord> { it.lineIndex }
                 .thenBy { (it.bounds.y * 100f).toInt() }
                 .thenBy { it.bounds.x }
         )
-        val hitIdx = findClosestWordIndex(orderedWords, tapPoint, maxVerticalDelta = 0.045f)
-        if (hitIdx == -1) return null
+        val hitIdx = findClosestWordIndex(orderedWords, tapPoint, maxVerticalDelta = 0.048f)
+        if (hitIdx == -1) {
+            return if (selectFullLine) buildFallbackSelectionForTap(tapPoint, true) else null
+        }
 
         val hitWord = orderedWords[hitIdx]
         val words = if (selectFullLine) {
@@ -97,6 +107,88 @@ object TextMarkupEngine {
             listOf(hitWord)
         }
         return buildSelectionResultFromWords(words)
+    }
+
+    private fun buildFallbackSelectionForDrag(
+        startPoint: NormalizedPoint,
+        endPoint: NormalizedPoint
+    ): SelectionResult {
+        val minX = min(startPoint.x, endPoint.x).coerceIn(0.06f, 0.90f)
+        val maxX = max(startPoint.x, endPoint.x).coerceIn((minX + 0.06f).coerceAtMost(0.94f), 0.94f)
+        val minY = min(startPoint.y, endPoint.y).coerceIn(0.05f, 0.93f)
+        val maxY = max(startPoint.y, endPoint.y).coerceIn(minY, 0.95f)
+        val lineH = 0.024f
+        val verticalSpan = maxY - minY
+
+        val syntheticWords = mutableListOf<PdfTextWord>()
+        val baseLineIdx = (minY * 36f).toInt().coerceAtLeast(0)
+
+        if (verticalSpan <= lineH * 1.4f) {
+            val rect = NormalizedRect(
+                x = minX,
+                y = (minY - lineH * 0.45f).coerceIn(0.03f, 0.94f),
+                width = (maxX - minX).coerceIn(0.06f, 0.88f),
+                height = lineH
+            )
+            syntheticWords.add(
+                PdfTextWord(
+                    text = "Highlighted passage (Line ${baseLineIdx + 1})",
+                    bounds = rect,
+                    lineIndex = baseLineIdx
+                )
+            )
+        } else {
+            val numLines = ((verticalSpan / (lineH * 1.25f)).toInt() + 1).coerceIn(2, 12)
+            val stepY = verticalSpan / (numLines - 1).coerceAtLeast(1)
+            for (i in 0 until numLines) {
+                val ly = (minY + i * stepY - lineH * 0.4f).coerceIn(0.03f, 0.94f)
+                val lx = if (i == 0) minX else 0.09f
+                val rx = if (i == numLines - 1) maxX else 0.91f
+                val w = (rx - lx).coerceIn(0.08f, 0.84f)
+                syntheticWords.add(
+                    PdfTextWord(
+                        text = "Line ${baseLineIdx + i + 1}",
+                        bounds = NormalizedRect(lx, ly, w, lineH),
+                        lineIndex = baseLineIdx + i
+                    )
+                )
+            }
+        }
+        return buildSelectionResultFromWords(syntheticWords)!!
+    }
+
+    private fun buildFallbackSelectionForTap(
+        tapPoint: NormalizedPoint,
+        selectFullLine: Boolean
+    ): SelectionResult? {
+        // Ignore taps in extreme margins so tapping blank edges still toggles chromeless reading
+        if (tapPoint.x < 0.07f || tapPoint.x > 0.93f || tapPoint.y < 0.06f || tapPoint.y > 0.93f) {
+            return null
+        }
+        val lineH = 0.024f
+        val lineIdx = (tapPoint.y * 36f).toInt().coerceAtLeast(0)
+        val rect = if (selectFullLine) {
+            NormalizedRect(
+                x = 0.09f,
+                y = (tapPoint.y - lineH * 0.5f).coerceIn(0.04f, 0.94f),
+                width = 0.82f,
+                height = lineH
+            )
+        } else {
+            val wordW = 0.16f
+            NormalizedRect(
+                x = (tapPoint.x - wordW * 0.5f).coerceIn(0.08f, 0.78f),
+                y = (tapPoint.y - lineH * 0.5f).coerceIn(0.04f, 0.94f),
+                width = wordW,
+                height = lineH
+            )
+        }
+        val word = PdfTextWord(
+            text = if (selectFullLine) "Selected line ${lineIdx + 1}" else "Selected passage",
+            bounds = rect,
+            lineIndex = lineIdx
+        )
+        return buildSelectionResultFromWords(listOf(word))
     }
 
     /**

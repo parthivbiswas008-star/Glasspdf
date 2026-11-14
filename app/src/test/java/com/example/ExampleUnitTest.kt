@@ -4,6 +4,7 @@ import com.example.engines.TextMarkupEngine
 import com.example.model.NormalizedPoint
 import com.example.model.NormalizedRect
 import com.example.model.PdfTextWord
+import com.example.model.ProToolWorkflow
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
@@ -30,4 +31,27 @@ class ExampleUnitTest {
         assertEquals(1, result.mergedLineRects.size)
         assertTrue(result.mergedLineRects.first().width > 0.35f)
     }
+
+    @Test
+    fun textMarkupEngine_fallbackSelectionOnImportedPdfWithoutPreIndexedWords() {
+        val dragSelection = TextMarkupEngine.computeTouchSelection(
+            pageWords = emptyList(),
+            startPoint = NormalizedPoint(0.15f, 0.32f),
+            endPoint = NormalizedPoint(0.75f, 0.33f)
+        )
+        assertNotNull(dragSelection)
+        assertTrue(dragSelection!!.mergedLineRects.isNotEmpty())
+        assertTrue(dragSelection.mergedLineRects.first().width >= 0.50f)
+
+        val tapSelection = TextMarkupEngine.selectWordOrLineAtPoint(
+            pageWords = emptyList(),
+            tapPoint = NormalizedPoint(0.40f, 0.45f),
+            selectFullLine = true
+        )
+        assertNotNull(tapSelection)
+        assertEquals(1, tapSelection!!.mergedLineRects.size)
+        assertTrue(ProToolWorkflow.entries.contains(ProToolWorkflow.FILL_AND_SIGN))
+    }
 }
+
+

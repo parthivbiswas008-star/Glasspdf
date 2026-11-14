@@ -26,6 +26,7 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -108,8 +109,17 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.automirrored.filled.Send
+import androidx.compose.material.icons.filled.CheckBox
+import androidx.compose.material.icons.filled.DeleteOutline
+import androidx.compose.material.icons.filled.Language
+import androidx.compose.material.icons.filled.PushPin
+import androidx.compose.material.icons.filled.RadioButtonChecked
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.data.local.PdfDocumentEntity
+import com.example.model.AiLanguageOption
 import com.example.model.DrawToolType
 import com.example.model.EditSubTool
 import com.example.model.FormFieldType
@@ -127,6 +137,7 @@ import com.example.ui.components.GlassSurface
 import com.example.ui.theme.GlassThemeMode
 import com.example.ui.theme.JetBrainsTabularFamily
 import com.example.ui.theme.LocalLiquidGlass
+import com.example.viewmodel.AiAssistantUiState
 import com.example.viewmodel.PdfWorkspaceViewModel
 import kotlinx.coroutines.launch
 
@@ -162,6 +173,8 @@ fun MobilePdfViewer(
     val isSearchVisible by viewModel.isViewerSearchVisible.collectAsStateWithLifecycle()
     val searchQuery by viewModel.viewerSearchQuery.collectAsStateWithLifecycle()
     val savedSignatures by viewModel.savedSignatures.collectAsStateWithLifecycle()
+    val aiAssistantQuery by viewModel.aiAssistantQuery.collectAsStateWithLifecycle()
+    val aiAssistantUiState by viewModel.aiAssistantUiState.collectAsStateWithLifecycle()
 
     // Dialog states for Text Box / Sticky Note placement, Read Mode Sticky Note tool, and AcroForm editing
     var readModeStickyNoteActive by remember { mutableStateOf(false) }
@@ -335,6 +348,9 @@ fun MobilePdfViewer(
                                     editingFormFieldText = field.textValue
                                 }
                             },
+                            onSelectRadioOption = { field, selectedOpt ->
+                                viewModel.updateFormFieldValue(field.id, newText = selectedOpt)
+                            },
                             onDeletePlacedElement = { elId ->
                                 viewModel.deletePlacedElement(elId)
                             },
@@ -448,6 +464,9 @@ fun MobilePdfViewer(
                                     editingFormFieldText = field.textValue
                                 }
                             },
+                            onSelectRadioOption = { field, selectedOpt ->
+                                viewModel.updateFormFieldValue(field.id, newText = selectedOpt)
+                            },
                             onDeletePlacedElement = { elId ->
                                 viewModel.deletePlacedElement(elId)
                             },
@@ -537,6 +556,19 @@ fun MobilePdfViewer(
                     forceStickyNotePlacement = true
                     pendingPlacementPoint = anchor
                     pendingPlacementText = if (prefill.isNotBlank()) "Re: \"$prefill\" — " else ""
+                },
+                onAskAiAboutSelection = {
+                    val selText = touchSelection?.selectedText ?: selectedExistingMarkup?.selectedText ?: ""
+                    val prompt = if (selText.isNotBlank()) {
+                        "Explain and summarize this selected passage: \"${selText.take(160)}\""
+                    } else {
+                        "Summarize the key points on Page ${currentPageIndex + 1}"
+                    }
+                    viewModel.askDocumentAiAssistant(prompt)
+                },
+                onSyncVisionOcr = {
+                    viewModel.clearTouchSelection()
+                    viewModel.syncCurrentPageWithVisionOcr()
                 },
                 onDeleteExistingMarkup = {
                     selectedExistingMarkup?.let { viewModel.deleteExistingMarkup(it.id) }
@@ -749,6 +781,41 @@ fun MobilePdfViewer(
                     onStampQuickSignature = {
                         savedSignatures.firstOrNull()?.let { viewModel.stampSavedSignatureOnCurrentPage(it) }
                             ?: viewModel.setSignatureModalVisible(true)
+                    },
+                    onAddAcroFormField = { fieldType, defaultLabel ->
+                        viewModel.addAcroFormField(
+                            targetDoc = doc,
+                            pageIndex = currentPageIndex,
+                            type = fieldType,
+                            label = defaultLabel
+                        )
+                    },
+                    onOpenFillAndSignHub = {
+                        viewModel.launchProWorkflow(ProToolWorkflow.FILL_AND_SIGN)
+                    }
+                )
+
+                // Row B2: Floating Liquid Glass Document AI Assistant Bar (Input Field + Send Button + Preferred Language Chip)
+                FloatingDocumentAiAssistantBar(
+                    query = aiAssistantQuery,
+                    onQueryChange = { viewModel.setAiAssistantQuery(it) },
+                    preferredLanguage = appSettings.preferredAiLanguage,
+                    onSelectLanguage = { viewModel.setPreferredAiLanguage(it) },
+                    uiState = aiAssistantUiState,
+                    currentPage = currentPageIndex + 1,
+                    onSendQuery = { customPrompt ->
+                        viewModel.askDocumentAiAssistant(customPrompt)
+                    },
+                    onCopyReply = { text ->
+                        val clipboard = context.getSystemService(android.content.Context.CLIPBOARD_SERVICE) as? android.content.ClipboardManager
+                        clipboard?.setPrimaryClip(android.content.ClipData.newPlainText("AI Document Reply", text))
+                        viewModel.showDynamicToast("AI response copied")
+                    },
+                    onPinReplyAsSticky = { text ->
+                        viewModel.pinAiReplyAsStickyNote(text)
+                    },
+                    onDismissReply = {
+                        viewModel.dismissAiAssistantReply()
                     }
                 )
 
@@ -820,32 +887,79 @@ fun MobilePdfViewer(
         )
     }
 
-    // Dialog for filling an interactive AcroForm field
+    // Dialog for filling or editing an interactive AcroForm field (PDFTextField, PDFRadioGroup, PDFDropdown)
     if (editingFormField != null) {
         val field = editingFormField!!
         AlertDialog(
             onDismissRequest = { editingFormField = null },
-            title = { Text(field.label) },
+            title = {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(field.label, style = MaterialTheme.typography.titleMedium)
+                        Text(
+                            text = "AcroForm • ${field.type.name} • Page ${field.pageIndex + 1}",
+                            fontFamily = JetBrainsTabularFamily,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = glass.accent
+                        )
+                    }
+                    IconButton(
+                        onClick = {
+                            viewModel.deleteAcroFormField(field.id, doc)
+                            editingFormField = null
+                        }
+                    ) {
+                        Icon(Icons.Default.DeleteOutline, "Remove form field", tint = MaterialTheme.colorScheme.error)
+                    }
+                }
+            },
             text = {
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedTextField(
-                        value = editingFormFieldText,
-                        onValueChange = { editingFormFieldText = it },
-                        label = { Text("Field Value") },
-                        modifier = Modifier.fillMaxWidth()
-                    )
-                    if (field.options.isNotEmpty()) {
-                        Text("Presets:", style = MaterialTheme.typography.labelSmall)
-                        Row(
-                            modifier = Modifier.horizontalScroll(rememberScrollState()),
-                            horizontalArrangement = Arrangement.spacedBy(6.dp)
-                        ) {
-                            field.options.forEach { opt ->
-                                GlassPill(
-                                    onClick = { editingFormFieldText = opt },
-                                    isSelected = editingFormFieldText == opt
-                                ) {
-                                    Text(opt, style = MaterialTheme.typography.labelSmall)
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    if (field.type == FormFieldType.RADIO && field.options.isNotEmpty()) {
+                        Text("Select Radio Option:", style = MaterialTheme.typography.labelMedium)
+                        field.options.forEach { opt ->
+                            val selected = editingFormFieldText.equals(opt, ignoreCase = true)
+                            GlassPill(
+                                onClick = { editingFormFieldText = opt },
+                                isSelected = selected,
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.RadioButtonChecked,
+                                    contentDescription = null,
+                                    tint = if (selected) glass.accent else glass.secondaryText,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                                Spacer(Modifier.width(8.dp))
+                                Text(opt, style = MaterialTheme.typography.bodyMedium, color = glass.primaryText)
+                            }
+                        }
+                    } else {
+                        OutlinedTextField(
+                            value = editingFormFieldText,
+                            onValueChange = { editingFormFieldText = it },
+                            label = { Text("Field Value") },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("acroform_dialog_text_input")
+                        )
+                        if (field.options.isNotEmpty()) {
+                            Text("Quick Options:", style = MaterialTheme.typography.labelSmall)
+                            Row(
+                                modifier = Modifier.horizontalScroll(rememberScrollState()),
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                field.options.forEach { opt ->
+                                    GlassPill(
+                                        onClick = { editingFormFieldText = opt },
+                                        isSelected = editingFormFieldText == opt
+                                    ) {
+                                        Text(opt, style = MaterialTheme.typography.labelSmall)
+                                    }
                                 }
                             }
                         }
@@ -857,7 +971,8 @@ fun MobilePdfViewer(
                     onClick = {
                         viewModel.updateFormFieldValue(field.id, newText = editingFormFieldText)
                         editingFormField = null
-                    }
+                    },
+                    modifier = Modifier.testTag("acroform_dialog_save_button")
                 ) {
                     Text("Save Field")
                 }
@@ -1072,7 +1187,9 @@ private fun SecondaryModeSubToolbarPill(
     onSelectDrawTool: (DrawToolType) -> Unit,
     onSelectEditSubTool: (EditSubTool) -> Unit,
     onOpenSignatureModal: () -> Unit,
-    onStampQuickSignature: () -> Unit
+    onStampQuickSignature: () -> Unit,
+    onAddAcroFormField: (FormFieldType, String) -> Unit = { _, _ -> },
+    onOpenFillAndSignHub: () -> Unit = {}
 ) {
     val glass = LocalLiquidGlass.current
     if (dockMode == ViewerDockMode.PAGES) return
@@ -1230,16 +1347,390 @@ private fun SecondaryModeSubToolbarPill(
                     ) {
                         Icon(Icons.Default.Draw, null, tint = glass.primaryText, modifier = Modifier.size(16.dp))
                         Spacer(Modifier.width(6.dp))
-                        Text("Liquid Glass Signature Pad", style = MaterialTheme.typography.labelLarge, color = glass.primaryText)
+                        Text("Signature Pad", style = MaterialTheme.typography.labelLarge, color = glass.primaryText)
                     }
                     GlassPill(
                         onClick = onStampQuickSignature,
                         modifier = Modifier.testTag("quick_stamp_signature_button")
                     ) {
-                        Text("One-Tap Vault Stamp", style = MaterialTheme.typography.labelLarge, color = glass.primaryText)
+                        Text("Stamp Vault Sig", style = MaterialTheme.typography.labelLarge, color = glass.primaryText)
+                    }
+                    GlassPill(
+                        onClick = { onAddAcroFormField(FormFieldType.TEXT, "Signatory / Notes Field") },
+                        modifier = Modifier.testTag("sign_add_text_field_button")
+                    ) {
+                        Icon(Icons.Default.TextFields, null, tint = glass.accent, modifier = Modifier.size(15.dp))
+                        Spacer(Modifier.width(4.dp))
+                        Text("+ Text Field", style = MaterialTheme.typography.labelLarge, color = glass.primaryText)
+                    }
+                    GlassPill(
+                        onClick = { onAddAcroFormField(FormFieldType.CHECKBOX, "Approval Check") },
+                        modifier = Modifier.testTag("sign_add_checkbox_field_button")
+                    ) {
+                        Icon(Icons.Default.CheckBox, null, tint = glass.accent, modifier = Modifier.size(15.dp))
+                        Spacer(Modifier.width(4.dp))
+                        Text("+ Checkbox", style = MaterialTheme.typography.labelLarge, color = glass.primaryText)
+                    }
+                    GlassPill(
+                        onClick = { onAddAcroFormField(FormFieldType.RADIO, "Disposition Radio Group") },
+                        modifier = Modifier.testTag("sign_add_radio_field_button")
+                    ) {
+                        Icon(Icons.Default.RadioButtonChecked, null, tint = glass.accent, modifier = Modifier.size(15.dp))
+                        Spacer(Modifier.width(4.dp))
+                        Text("+ Radio Group", style = MaterialTheme.typography.labelLarge, color = glass.primaryText)
+                    }
+                    GlassPill(
+                        onClick = onOpenFillAndSignHub,
+                        modifier = Modifier.testTag("sign_open_fill_sign_hub_button")
+                    ) {
+                        Text("Fill & Sign Hub", style = MaterialTheme.typography.labelLarge, color = glass.goldBadge)
                     }
                 }
                 else -> {}
+            }
+        }
+    }
+}
+
+/**
+ * Floating Liquid Glass AI Assistant Bar at the bottom of the PDF viewer screen.
+ * Includes an input field for queries, a language selector chip (synced with Settings),
+ * a Send button, quick prompt pills, and an expandable glass reply card that uses the
+ * active PDF's full document context and responds in the user's preferred language.
+ */
+@Composable
+private fun FloatingDocumentAiAssistantBar(
+    query: String,
+    onQueryChange: (String) -> Unit,
+    preferredLanguage: AiLanguageOption,
+    onSelectLanguage: (AiLanguageOption) -> Unit,
+    uiState: AiAssistantUiState,
+    currentPage: Int,
+    onSendQuery: (String?) -> Unit,
+    onCopyReply: (String) -> Unit,
+    onPinReplyAsSticky: (String) -> Unit,
+    onDismissReply: () -> Unit
+) {
+    val glass = LocalLiquidGlass.current
+    var langMenuExpanded by remember { mutableStateOf(false) }
+
+    Column(
+        modifier = Modifier.fillMaxWidth(),
+        verticalArrangement = Arrangement.spacedBy(6.dp)
+    ) {
+        // Expandable Liquid Glass Response Card when streaming, completed, or error
+        AnimatedVisibility(
+            visible = uiState !is AiAssistantUiState.Idle,
+            enter = fadeIn() + slideInVertically(initialOffsetY = { it / 2 }),
+            exit = fadeOut() + slideOutVertically(targetOffsetY = { it / 2 })
+        ) {
+            GlassSurface(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag("viewer_ai_assistant_reply_card"),
+                shape = RoundedCornerShape(24.dp),
+                elevation = 18.dp
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 14.dp, vertical = 12.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    val badgeText = when (uiState) {
+                        is AiAssistantUiState.Streaming -> uiState.contextBadge
+                        is AiAssistantUiState.Success -> uiState.contextBadge
+                        is AiAssistantUiState.Error -> "AI Assistant • ${preferredLanguage.shortCode}"
+                        AiAssistantUiState.Idle -> ""
+                    }
+                    val activeQuestion = when (uiState) {
+                        is AiAssistantUiState.Streaming -> uiState.query
+                        is AiAssistantUiState.Success -> uiState.query
+                        is AiAssistantUiState.Error -> uiState.query
+                        AiAssistantUiState.Idle -> ""
+                    }
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.AutoAwesome,
+                                contentDescription = null,
+                                tint = glass.goldBadge,
+                                modifier = Modifier.size(16.dp)
+                            )
+                            Text(
+                                text = activeQuestion,
+                                style = MaterialTheme.typography.labelLarge,
+                                fontWeight = FontWeight.SemiBold,
+                                color = glass.primaryText,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.weight(1f, fill = false)
+                            )
+                            if (badgeText.isNotBlank()) {
+                                Box(
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(50))
+                                        .background(glass.accentSoft)
+                                        .padding(horizontal = 8.dp, vertical = 2.dp)
+                                ) {
+                                    Text(
+                                        text = badgeText,
+                                        fontFamily = JetBrainsTabularFamily,
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = glass.accent
+                                    )
+                                }
+                            }
+                        }
+
+                        IconButton(
+                            onClick = onDismissReply,
+                            modifier = Modifier
+                                .size(26.dp)
+                                .testTag("viewer_ai_reply_close_button")
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Close,
+                                contentDescription = "Dismiss AI Reply",
+                                tint = glass.secondaryText,
+                                modifier = Modifier.size(16.dp)
+                            )
+                        }
+                    }
+
+                    when (uiState) {
+                        is AiAssistantUiState.Streaming -> {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(15.dp),
+                                    strokeWidth = 2.dp,
+                                    color = glass.accent
+                                )
+                                Text(
+                                    text = "Synthesizing in ${preferredLanguage.label} (${preferredLanguage.nativeName})…",
+                                    fontFamily = JetBrainsTabularFamily,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = glass.accent
+                                )
+                            }
+                            Text(
+                                text = uiState.partialText,
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = glass.primaryText,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .heightIn(max = 150.dp)
+                                    .verticalScroll(rememberScrollState())
+                            )
+                        }
+
+                        is AiAssistantUiState.Success -> {
+                            Text(
+                                text = uiState.answerText,
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = glass.primaryText,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .heightIn(max = 175.dp)
+                                    .verticalScroll(rememberScrollState())
+                                    .testTag("viewer_ai_assistant_answer_text")
+                            )
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .horizontalScroll(rememberScrollState()),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                GlassPill(
+                                    onClick = { onCopyReply(uiState.answerText) },
+                                    contentPaddingHorizontal = 10.dp,
+                                    contentPaddingVertical = 6.dp,
+                                    modifier = Modifier.testTag("viewer_ai_copy_reply_button")
+                                ) {
+                                    Icon(Icons.Default.ContentCopy, null, tint = glass.accent, modifier = Modifier.size(14.dp))
+                                    Spacer(Modifier.width(4.dp))
+                                    Text("Copy", style = MaterialTheme.typography.labelSmall, color = glass.primaryText)
+                                }
+                                GlassPill(
+                                    onClick = { onPinReplyAsSticky(uiState.answerText) },
+                                    contentPaddingHorizontal = 10.dp,
+                                    contentPaddingVertical = 6.dp,
+                                    modifier = Modifier.testTag("viewer_ai_pin_sticky_button")
+                                ) {
+                                    Icon(Icons.Default.PushPin, null, tint = glass.goldBadge, modifier = Modifier.size(14.dp))
+                                    Spacer(Modifier.width(4.dp))
+                                    Text("Pin as Sticky Note", style = MaterialTheme.typography.labelSmall, color = glass.primaryText)
+                                }
+                                GlassPill(
+                                    onClick = { onSendQuery("Summarize Page $currentPage action items and key metrics") },
+                                    contentPaddingHorizontal = 10.dp,
+                                    contentPaddingVertical = 6.dp
+                                ) {
+                                    Text("Action Items", style = MaterialTheme.typography.labelSmall, color = glass.primaryText)
+                                }
+                            }
+                        }
+
+                        is AiAssistantUiState.Error -> {
+                            Text(
+                                text = uiState.message,
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.error
+                            )
+                        }
+
+                        AiAssistantUiState.Idle -> {}
+                    }
+                }
+            }
+        }
+
+        // Compact Floating Liquid Glass AI Input Bar
+        GlassSurface(
+            modifier = Modifier
+                .fillMaxWidth()
+                .testTag("viewer_ai_assistant_bar"),
+            shape = RoundedCornerShape(50),
+            elevation = 16.dp
+        ) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 10.dp, vertical = 6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.Default.AutoAwesome,
+                    contentDescription = "Document AI Assistant",
+                    tint = glass.goldBadge,
+                    modifier = Modifier
+                        .padding(start = 4.dp)
+                        .size(18.dp)
+                )
+
+                // Preferred Language Selector Chip
+                Box {
+                    GlassPill(
+                        onClick = { langMenuExpanded = true },
+                        contentPaddingHorizontal = 8.dp,
+                        contentPaddingVertical = 5.dp,
+                        modifier = Modifier.testTag("viewer_ai_language_chip")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Language,
+                            contentDescription = "Preferred AI Language",
+                            tint = glass.accent,
+                            modifier = Modifier.size(14.dp)
+                        )
+                        Spacer(Modifier.width(4.dp))
+                        Text(
+                            text = preferredLanguage.shortCode,
+                            fontFamily = JetBrainsTabularFamily,
+                            fontWeight = FontWeight.Bold,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = glass.primaryText
+                        )
+                    }
+
+                    DropdownMenu(
+                        expanded = langMenuExpanded,
+                        onDismissRequest = { langMenuExpanded = false }
+                    ) {
+                        AiLanguageOption.entries.forEach { langOpt ->
+                            DropdownMenuItem(
+                                text = {
+                                    Text("${langOpt.label} (${langOpt.nativeName})")
+                                },
+                                onClick = {
+                                    langMenuExpanded = false
+                                    onSelectLanguage(langOpt)
+                                }
+                            )
+                        }
+                    }
+                }
+
+                // Query Input Field
+                Box(
+                    modifier = Modifier
+                        .weight(1f)
+                        .padding(vertical = 4.dp),
+                    contentAlignment = Alignment.CenterStart
+                ) {
+                    if (query.isEmpty()) {
+                        Text(
+                            text = "Ask AI about Page $currentPage (${preferredLanguage.label})…",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = glass.mutedText,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                    BasicTextField(
+                        value = query,
+                        onValueChange = onQueryChange,
+                        textStyle = MaterialTheme.typography.bodyMedium.copy(color = glass.primaryText),
+                        cursorBrush = SolidColor(glass.accent),
+                        singleLine = true,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("viewer_ai_assistant_input")
+                    )
+                }
+
+                // Quick Summarize Pill when input is empty
+                if (query.isBlank() && uiState is AiAssistantUiState.Idle) {
+                    GlassPill(
+                        onClick = {
+                            onSendQuery("Summarize the key points and details on Page $currentPage of this PDF.")
+                        },
+                        contentPaddingHorizontal = 9.dp,
+                        contentPaddingVertical = 5.dp,
+                        modifier = Modifier.testTag("viewer_ai_quick_summarize_pill")
+                    ) {
+                        Text(
+                            text = "Summarize",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = glass.accent
+                        )
+                    }
+                }
+
+                // Send Query Button
+                GlassPill(
+                    onClick = {
+                        if (query.isNotBlank()) {
+                            onSendQuery(null)
+                        } else {
+                            onSendQuery("Summarize the key points and findings on Page $currentPage.")
+                        }
+                    },
+                    isSelected = true,
+                    contentPaddingHorizontal = 11.dp,
+                    contentPaddingVertical = 7.dp,
+                    modifier = Modifier.testTag("viewer_ai_assistant_send_button")
+                ) {
+                    Icon(
+                        imageVector = Icons.AutoMirrored.Filled.Send,
+                        contentDescription = "Send query to AI Assistant",
+                        tint = glass.primaryText,
+                        modifier = Modifier.size(16.dp)
+                    )
+                }
             }
         }
     }

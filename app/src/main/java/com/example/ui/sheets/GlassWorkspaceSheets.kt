@@ -74,12 +74,20 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.CheckBox
+import androidx.compose.material.icons.filled.CheckBoxOutlineBlank
+import androidx.compose.material.icons.filled.Draw
+import androidx.compose.material.icons.filled.RadioButtonChecked
+import androidx.compose.material.icons.filled.RadioButtonUnchecked
+import androidx.compose.material.icons.filled.TextFields
 import com.example.data.local.PdfDocumentEntity
 import com.example.model.AiAspectRatioOption
 import com.example.model.AiImageModelOption
 import com.example.model.AiImageSizeOption
 import com.example.model.DocumentAnnotationsSnapshot
 import com.example.model.EditorialStampPreset
+import com.example.model.FormFieldType
 import com.example.model.NormalizedPoint
 import com.example.model.ProToolWorkflow
 import com.example.model.StudioGalleryAsset
@@ -1502,6 +1510,384 @@ fun ProToolboxAndExportModals(
                                 .testTag("confirm_irreversible_redaction_button")
                         ) {
                             Text("Apply Permanent Redactions", style = MaterialTheme.typography.titleMedium, color = glass.primaryText)
+                        }
+                    }
+                }
+
+                ProToolWorkflow.FILL_AND_SIGN -> {
+                    // Default to activeDoc or the seeded Interactive Contract / Agreement with AcroForm fields
+                    val defaultFillDoc = remember(activeDoc, documents) {
+                        activeDoc
+                            ?: documents.firstOrNull { d ->
+                                DocumentAnnotationsSnapshot.fromJsonString(d.annotationsJson).formFields.isNotEmpty()
+                            }
+                            ?: targetDoc
+                    }
+                    var selectedDocId by remember(defaultFillDoc) { mutableStateOf(defaultFillDoc.id) }
+                    val currentFillDoc = documents.firstOrNull { it.id == selectedDocId } ?: defaultFillDoc
+                    val liveSnapshot by viewModel.activeSnapshot.collectAsStateWithLifecycle()
+                    val docSnapshot = remember(currentFillDoc.annotationsJson, activeDoc?.id, liveSnapshot) {
+                        if (activeDoc?.id == currentFillDoc.id) {
+                            liveSnapshot
+                        } else {
+                            DocumentAnnotationsSnapshot.fromJsonString(currentFillDoc.annotationsJson)
+                        }
+                    }
+                    var newFieldLabel by remember { mutableStateOf("") }
+
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(max = 520.dp)
+                            .verticalScroll(rememberScrollState()),
+                        verticalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        // Document selector pills
+                        Text("1. Target Document", style = MaterialTheme.typography.labelLarge, color = glass.primaryText)
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .horizontalScroll(rememberScrollState()),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            documents.forEach { d ->
+                                GlassPill(
+                                    onClick = { selectedDocId = d.id },
+                                    isSelected = currentFillDoc.id == d.id,
+                                    modifier = Modifier.testTag("fill_sign_doc_${d.id}")
+                                ) {
+                                    Text(
+                                        text = d.title.removeSuffix(".pdf").take(22),
+                                        style = MaterialTheme.typography.labelLarge,
+                                        color = glass.primaryText
+                                    )
+                                }
+                            }
+                        }
+
+                        // Add Interactive AcroForm Fields Row (+ Text Field, + Checkbox, + Radio Group)
+                        Text(
+                            text = "2. Add Interactive AcroForm Elements",
+                            style = MaterialTheme.typography.labelLarge,
+                            color = glass.primaryText
+                        )
+                        OutlinedTextField(
+                            value = newFieldLabel,
+                            onValueChange = { newFieldLabel = it },
+                            label = { Text("New Field Label (optional)") },
+                            singleLine = true,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("fill_sign_new_field_label_input")
+                        )
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .horizontalScroll(rememberScrollState()),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            GlassPill(
+                                onClick = {
+                                    viewModel.addAcroFormField(
+                                        targetDoc = currentFillDoc,
+                                        pageIndex = 0,
+                                        type = FormFieldType.TEXT,
+                                        label = newFieldLabel.ifBlank { "Authorized Signatory" }
+                                    )
+                                    newFieldLabel = ""
+                                },
+                                modifier = Modifier.testTag("fill_sign_add_text_field_button")
+                            ) {
+                                Icon(Icons.Default.TextFields, null, tint = glass.accent, modifier = Modifier.size(15.dp))
+                                Spacer(Modifier.width(5.dp))
+                                Text("+ PDFTextField", style = MaterialTheme.typography.labelLarge, color = glass.primaryText)
+                            }
+                            GlassPill(
+                                onClick = {
+                                    viewModel.addAcroFormField(
+                                        targetDoc = currentFillDoc,
+                                        pageIndex = 0,
+                                        type = FormFieldType.CHECKBOX,
+                                        label = newFieldLabel.ifBlank { "Approve Terms & Scope" },
+                                        defaultValue = "true"
+                                    )
+                                    newFieldLabel = ""
+                                },
+                                modifier = Modifier.testTag("fill_sign_add_checkbox_button")
+                            ) {
+                                Icon(Icons.Default.CheckBox, null, tint = glass.accent, modifier = Modifier.size(15.dp))
+                                Spacer(Modifier.width(5.dp))
+                                Text("+ PDFCheckBox", style = MaterialTheme.typography.labelLarge, color = glass.primaryText)
+                            }
+                            GlassPill(
+                                onClick = {
+                                    viewModel.addAcroFormField(
+                                        targetDoc = currentFillDoc,
+                                        pageIndex = 0,
+                                        type = FormFieldType.RADIO,
+                                        label = newFieldLabel.ifBlank { "Payment Schedule (Radio Group)" },
+                                        defaultValue = "Milestone",
+                                        options = listOf("Milestone", "Monthly", "Escrow")
+                                    )
+                                    newFieldLabel = ""
+                                },
+                                modifier = Modifier.testTag("fill_sign_add_radio_button")
+                            ) {
+                                Icon(Icons.Default.RadioButtonChecked, null, tint = glass.accent, modifier = Modifier.size(15.dp))
+                                Spacer(Modifier.width(5.dp))
+                                Text("+ PDFRadioGroup", style = MaterialTheme.typography.labelLarge, color = glass.primaryText)
+                            }
+                        }
+
+                        // Detected Interactive AcroForm Fields List
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = "3. Detected AcroForm Fields (${docSnapshot.formFields.size})",
+                                style = MaterialTheme.typography.labelLarge,
+                                color = glass.primaryText
+                            )
+                            if (docSnapshot.formFields.isEmpty()) {
+                                GlassPill(
+                                    onClick = { viewModel.seedStandardAcroFormFieldsOnDocument(currentFillDoc) },
+                                    contentPaddingHorizontal = 10.dp,
+                                    contentPaddingVertical = 6.dp,
+                                    modifier = Modifier.testTag("fill_sign_seed_fields_button")
+                                ) {
+                                    Icon(Icons.Default.Add, null, tint = glass.goldBadge, modifier = Modifier.size(14.dp))
+                                    Spacer(Modifier.width(4.dp))
+                                    Text("Auto-Detect Form Block", style = MaterialTheme.typography.labelSmall, color = glass.primaryText)
+                                }
+                            }
+                        }
+
+                        if (docSnapshot.formFields.isEmpty()) {
+                            Text(
+                                text = "No AcroForm fields on this PDF yet. Tap 'Auto-Detect Form Block' or any '+ PDF...' button above to add interactive fields.",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = glass.secondaryText
+                            )
+                        } else {
+                            docSnapshot.formFields.forEach { field ->
+                                Column(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clip(RoundedCornerShape(18.dp))
+                                        .background(glass.accentSoft.copy(alpha = 0.45f))
+                                        .border(1.dp, glass.rimBorder, RoundedCornerShape(18.dp))
+                                        .padding(12.dp)
+                                        .testTag("fill_sign_item_${field.id}"),
+                                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Column(modifier = Modifier.weight(1f)) {
+                                            Text(
+                                                text = field.label,
+                                                style = MaterialTheme.typography.titleSmall,
+                                                color = glass.primaryText
+                                            )
+                                            Text(
+                                                text = "${field.type.name} • Page ${field.pageIndex + 1}",
+                                                fontFamily = JetBrainsTabularFamily,
+                                                style = MaterialTheme.typography.labelSmall,
+                                                color = glass.accent
+                                            )
+                                        }
+                                        IconButton(
+                                            onClick = { viewModel.deleteAcroFormField(field.id, currentFillDoc) },
+                                            modifier = Modifier.size(28.dp)
+                                        ) {
+                                            Icon(Icons.Default.DeleteOutline, "Delete field", tint = glass.secondaryText, modifier = Modifier.size(17.dp))
+                                        }
+                                    }
+
+                                    when (field.type) {
+                                        FormFieldType.CHECKBOX -> {
+                                            GlassPill(
+                                                onClick = {
+                                                    viewModel.updateFormFieldInDocument(
+                                                        doc = currentFillDoc,
+                                                        fieldId = field.id,
+                                                        newChecked = !field.isChecked
+                                                    )
+                                                },
+                                                isSelected = field.isChecked,
+                                                modifier = Modifier
+                                                    .fillMaxWidth()
+                                                    .testTag("fill_sign_checkbox_${field.id}")
+                                            ) {
+                                                Icon(
+                                                    imageVector = if (field.isChecked) Icons.Default.CheckBox else Icons.Default.CheckBoxOutlineBlank,
+                                                    contentDescription = field.label,
+                                                    tint = if (field.isChecked) glass.accent else glass.secondaryText,
+                                                    modifier = Modifier.size(18.dp)
+                                                )
+                                                Spacer(Modifier.width(8.dp))
+                                                Text(
+                                                    text = if (field.isChecked) "Checked (Yes)" else "Unchecked (Tap to Check)",
+                                                    style = MaterialTheme.typography.labelLarge,
+                                                    color = glass.primaryText
+                                                )
+                                            }
+                                        }
+
+                                        FormFieldType.RADIO -> {
+                                            val opts = field.options.ifEmpty { listOf("Approved", "Conditional", "Revise") }
+                                            Row(
+                                                modifier = Modifier
+                                                    .fillMaxWidth()
+                                                    .horizontalScroll(rememberScrollState()),
+                                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                            ) {
+                                                opts.forEach { opt ->
+                                                    val selected = field.textValue.equals(opt, ignoreCase = true)
+                                                    GlassPill(
+                                                        onClick = {
+                                                            viewModel.updateFormFieldInDocument(
+                                                                doc = currentFillDoc,
+                                                                fieldId = field.id,
+                                                                newText = opt
+                                                            )
+                                                        },
+                                                        isSelected = selected,
+                                                        modifier = Modifier.testTag("fill_sign_radio_${field.id}_$opt")
+                                                    ) {
+                                                        Icon(
+                                                            imageVector = if (selected) Icons.Default.RadioButtonChecked else Icons.Default.RadioButtonUnchecked,
+                                                            contentDescription = opt,
+                                                            tint = if (selected) glass.accent else glass.secondaryText,
+                                                            modifier = Modifier.size(16.dp)
+                                                        )
+                                                        Spacer(Modifier.width(5.dp))
+                                                        Text(opt, style = MaterialTheme.typography.labelLarge, color = glass.primaryText)
+                                                    }
+                                                }
+                                            }
+                                        }
+
+                                        FormFieldType.TEXT, FormFieldType.DROPDOWN -> {
+                                            var localText by remember(field.id, field.textValue) { mutableStateOf(field.textValue) }
+                                            OutlinedTextField(
+                                                value = localText,
+                                                onValueChange = { updated ->
+                                                    localText = updated
+                                                    viewModel.updateFormFieldInDocument(
+                                                        doc = currentFillDoc,
+                                                        fieldId = field.id,
+                                                        newText = updated
+                                                    )
+                                                },
+                                                label = { Text("Enter ${field.label}") },
+                                                singleLine = true,
+                                                modifier = Modifier
+                                                    .fillMaxWidth()
+                                                    .testTag("fill_sign_text_${field.id}")
+                                            )
+                                            if (field.options.isNotEmpty()) {
+                                                Row(
+                                                    modifier = Modifier.horizontalScroll(rememberScrollState()),
+                                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                                ) {
+                                                    field.options.forEach { opt ->
+                                                        GlassPill(
+                                                            onClick = {
+                                                                localText = opt
+                                                                viewModel.updateFormFieldInDocument(
+                                                                    doc = currentFillDoc,
+                                                                    fieldId = field.id,
+                                                                    newText = opt
+                                                                )
+                                                            },
+                                                            isSelected = localText == opt,
+                                                            contentPaddingHorizontal = 10.dp,
+                                                            contentPaddingVertical = 5.dp
+                                                        ) {
+                                                            Text(opt, style = MaterialTheme.typography.labelSmall, color = glass.primaryText)
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        // Action Buttons: Open Signature Pad, Open in Fill & Sign Viewer, Export Flattened PDF
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            GlassPill(
+                                onClick = {
+                                    viewModel.launchProWorkflow(null)
+                                    viewModel.setSignatureModalVisible(true)
+                                },
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .testTag("fill_sign_open_sig_pad_button")
+                            ) {
+                                Icon(Icons.Default.Draw, null, tint = glass.goldBadge, modifier = Modifier.size(16.dp))
+                                Spacer(Modifier.width(6.dp))
+                                Text("Signature Pad", style = MaterialTheme.typography.labelLarge, color = glass.primaryText)
+                            }
+                            GlassPill(
+                                onClick = {
+                                    viewModel.openDocumentInFillAndSignMode(currentFillDoc)
+                                },
+                                isSelected = true,
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .testTag("fill_sign_open_viewer_button")
+                            ) {
+                                Text("Open in Viewer", style = MaterialTheme.typography.labelLarge, color = glass.primaryText)
+                            }
+                        }
+
+                        GlassPill(
+                            onClick = {
+                                viewModel.launchProWorkflow(null)
+                                viewModel.exportAndShareAnnotatedPdf(context, "Filled_Signed")
+                            },
+                            isSelected = true,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("fill_sign_export_pdf_button")
+                        ) {
+                            Icon(Icons.Default.PictureAsPdf, null, tint = glass.accent, modifier = Modifier.size(18.dp))
+                            Spacer(Modifier.width(8.dp))
+                            Text("Save & Export Flattened AcroForm PDF", style = MaterialTheme.typography.titleMedium, color = glass.primaryText)
+                        }
+                    }
+                }
+
+                ProToolWorkflow.PASSWORD_PROTECT -> {
+                    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                        Text(
+                            text = "Protect ${targetDoc.title} with a SHA-256 vault password or manage existing lock settings.",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = glass.secondaryText
+                        )
+                        GlassPill(
+                            onClick = {
+                                viewModel.launchProWorkflow(null)
+                                viewModel.openPasswordManageModal(targetDoc)
+                            },
+                            isSelected = true,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("confirm_open_password_modal_button")
+                        ) {
+                            Icon(Icons.Default.Lock, null, tint = glass.goldBadge, modifier = Modifier.size(18.dp))
+                            Spacer(Modifier.width(8.dp))
+                            Text("Configure Password Lock", style = MaterialTheme.typography.titleMedium, color = glass.primaryText)
                         }
                     }
                 }

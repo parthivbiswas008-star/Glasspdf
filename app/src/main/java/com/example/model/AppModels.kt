@@ -534,6 +534,25 @@ enum class RenderQualityMode(val label: String, val targetWidthPx: Int, val subt
     ULTRA_PRINT("Ultra Print", 1480, "Maximum vector & diagram detail")
 }
 
+enum class AiLanguageOption(
+    val code: String,
+    val label: String,
+    val nativeName: String
+) {
+    ENGLISH("EN", "English", "English"),
+    SPANISH("ES", "Spanish", "Español"),
+    FRENCH("FR", "French", "Français"),
+    GERMAN("DE", "German", "Deutsch"),
+    HINDI("HI", "Hindi", "हिन्दी"),
+    BENGALI("BN", "Bengali", "বাংলা"),
+    JAPANESE("JA", "Japanese", "日本語"),
+    CHINESE("ZH", "Chinese", "中文"),
+    ARABIC("AR", "Arabic", "العربية"),
+    PORTUGUESE("PT", "Portuguese", "Português");
+
+    val shortCode: String get() = code
+}
+
 /**
  * Persistent user settings saved to SharedPreferences (`glass_pdf_settings_prefs`).
  */
@@ -550,7 +569,8 @@ data class AppSettings(
     val showFastScrollScrubber: Boolean = true,
     val rememberLastPage: Boolean = true,
     val defaultAuthorName: String = "Elena Rostova",
-    val defaultHighlightOpacity: Float = 0.42f
+    val defaultHighlightOpacity: Float = 0.42f,
+    val preferredAiLanguage: AiLanguageOption = AiLanguageOption.ENGLISH
 ) {
     fun toJsonString(): String = JSONObject().apply {
         put("themeMode", themeMode.name)
@@ -566,6 +586,7 @@ data class AppSettings(
         put("rememberLastPage", rememberLastPage)
         put("defaultAuthorName", defaultAuthorName)
         put("defaultHighlightOpacity", defaultHighlightOpacity.toDouble())
+        put("preferredAiLanguage", preferredAiLanguage.name)
     }.toString()
 
     companion object {
@@ -588,6 +609,9 @@ data class AppSettings(
                 val quality = RenderQualityMode.entries.find {
                     it.name == obj.optString("renderQuality")
                 } ?: RenderQualityMode.BALANCED_HD
+                val aiLang = AiLanguageOption.entries.find {
+                    it.name == obj.optString("preferredAiLanguage")
+                } ?: AiLanguageOption.ENGLISH
 
                 AppSettings(
                     themeMode = theme,
@@ -602,7 +626,8 @@ data class AppSettings(
                     showFastScrollScrubber = obj.optBoolean("showFastScrollScrubber", true),
                     rememberLastPage = obj.optBoolean("rememberLastPage", true),
                     defaultAuthorName = obj.optString("defaultAuthorName", "Elena Rostova"),
-                    defaultHighlightOpacity = obj.optDouble("defaultHighlightOpacity", 0.42).toFloat().coerceIn(0.25f, 0.75f)
+                    defaultHighlightOpacity = obj.optDouble("defaultHighlightOpacity", 0.42).toFloat().coerceIn(0.25f, 0.75f),
+                    preferredAiLanguage = aiLang
                 )
             } catch (_: Exception) {
                 AppSettings()
@@ -688,6 +713,11 @@ enum class ProToolWorkflow(
     val subtitle: String,
     val badgeText: String
 ) {
+    FILL_AND_SIGN(
+        "Fill & Sign",
+        "Interactive AcroForm fields, checkboxes, radio groups & signatures",
+        "AcroForm"
+    ),
     AI_IMAGE_STUDIO(
         "AI Image & Stamp Studio",
         "1K/2K/4K stamps, AI seals & covers across 8 ratios",
