@@ -113,10 +113,13 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.CheckBox
 import androidx.compose.material.icons.filled.DeleteOutline
+import androidx.compose.material.icons.filled.Key
 import androidx.compose.material.icons.filled.Language
 import androidx.compose.material.icons.filled.PushPin
 import androidx.compose.material.icons.filled.RadioButtonChecked
+import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.ui.draw.shadow
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.data.local.PdfDocumentEntity
 import com.example.model.AiLanguageOption
@@ -134,12 +137,21 @@ import com.example.model.ReflowTheme
 import com.example.model.ViewerDockMode
 import com.example.ui.components.GlassPill
 import com.example.ui.components.GlassSurface
+import com.example.ui.sheets.GeminiApiKeyActivationCard
+import com.example.ui.theme.FluorescentHighlightSwatches
 import com.example.ui.theme.GlassThemeMode
 import com.example.ui.theme.JetBrainsTabularFamily
 import com.example.ui.theme.LocalLiquidGlass
 import com.example.viewmodel.AiAssistantUiState
+import com.example.viewmodel.ApiKeyVerificationState
 import com.example.viewmodel.PdfWorkspaceViewModel
 import kotlinx.coroutines.launch
+
+private enum class ViewerSlideDrawer {
+    TOOLS,
+    AI_ASSISTANT,
+    VIEW_DISPLAY
+}
 
 @Composable
 fun MobilePdfViewer(
@@ -154,6 +166,7 @@ fun MobilePdfViewer(
     val appSettings by viewModel.appSettings.collectAsStateWithLifecycle()
     val snapshot by viewModel.activeSnapshot.collectAsStateWithLifecycle()
     val pageBitmaps by viewModel.pageBitmaps.collectAsStateWithLifecycle()
+    val pageAspectRatios by viewModel.pageAspectRatios.collectAsStateWithLifecycle()
     val currentPageIndex by viewModel.currentPageIndex.collectAsStateWithLifecycle()
     val zoomScale by viewModel.zoomScale.collectAsStateWithLifecycle()
     val isChromeless by viewModel.isChromeless.collectAsStateWithLifecycle()
@@ -175,6 +188,12 @@ fun MobilePdfViewer(
     val savedSignatures by viewModel.savedSignatures.collectAsStateWithLifecycle()
     val aiAssistantQuery by viewModel.aiAssistantQuery.collectAsStateWithLifecycle()
     val aiAssistantUiState by viewModel.aiAssistantUiState.collectAsStateWithLifecycle()
+    val isGeminiApiKeyConfigured by viewModel.isGeminiApiKeyConfigured.collectAsStateWithLifecycle()
+    val maskedGeminiApiKey by viewModel.maskedGeminiApiKey.collectAsStateWithLifecycle()
+    val apiKeyVerificationState by viewModel.apiKeyVerificationState.collectAsStateWithLifecycle()
+
+    // Slide-out drawer state (keeps ~88% of PDF canvas unobstructed for reading)
+    var activeBottomDrawer by remember { mutableStateOf<ViewerSlideDrawer?>(null) }
 
     // Dialog states for Text Box / Sticky Note placement, Read Mode Sticky Note tool, and AcroForm editing
     var readModeStickyNoteActive by remember { mutableStateOf(false) }
@@ -205,7 +224,9 @@ fun MobilePdfViewer(
     }
 
     BackHandler {
-        if (isReflowMode) {
+        if (activeBottomDrawer != null) {
+            activeBottomDrawer = null
+        } else if (isReflowMode) {
             viewModel.setReflowMode(false)
         } else if (dockMode == ViewerDockMode.PAGES) {
             viewModel.setViewerDockMode(ViewerDockMode.READ)
@@ -262,18 +283,19 @@ fun MobilePdfViewer(
                         )
                         .testTag("viewer_pdf_pages_lazy_column"),
                     contentPadding = PaddingValues(
-                        start = 14.dp,
-                        end = 26.dp,
-                        top = 92.dp,
-                        bottom = 175.dp
+                        start = 12.dp,
+                        end = 22.dp,
+                        top = 84.dp,
+                        bottom = 112.dp
                     ),
-                    verticalArrangement = Arrangement.spacedBy(18.dp),
+                    verticalArrangement = Arrangement.spacedBy(16.dp),
                     horizontalAlignment = Alignment.CenterHorizontally
                 ) {
                     itemsIndexed((0 until doc.pageCount).toList(), key = { _, idx -> idx }) { _, pageIdx ->
                         PdfPageLayer(
                             pageIndex = pageIdx,
                             pageBitmap = pageBitmaps[pageIdx],
+                            pageAspectRatio = pageAspectRatios[pageIdx] ?: (612f / 792f),
                             snapshot = snapshot,
                             dockMode = dockMode,
                             readModeStickyNoteActive = readModeStickyNoteActive,
@@ -284,7 +306,13 @@ fun MobilePdfViewer(
                             searchQuery = searchQuery,
                             touchSelection = if (pageIdx == currentPageIndex) touchSelection else null,
                             selectedExistingMarkup = if (pageIdx == currentPageIndex) selectedExistingMarkup else null,
-                            onTapNeutralSpace = { viewModel.toggleChromelessReading() },
+                            onTapNeutralSpace = {
+                                if (activeBottomDrawer != null) {
+                                    activeBottomDrawer = null
+                                } else {
+                                    viewModel.toggleChromelessReading()
+                                }
+                            },
                             onDoubleTapZoom = { viewModel.toggleSmartZoom() },
                             onSelectWordOrLineAtTap = { pt, selectFullLine ->
                                 viewModel.selectWordOrLineAtTap(pageIdx, pt, selectFullLine)
@@ -292,6 +320,12 @@ fun MobilePdfViewer(
                             onUpdateTouchSelection = { start, end ->
                                 viewModel.onPageScrolled(pageIdx)
                                 viewModel.updateTouchSelectionDrag(pageIdx, start, end)
+                            },
+                            onAdjustLeftHandle = { newLeft ->
+                                viewModel.adjustSelectionLeftHandle(pageIdx, newLeft)
+                            },
+                            onAdjustRightHandle = { newRight ->
+                                viewModel.adjustSelectionRightHandle(pageIdx, newRight)
                             },
                             onSelectionFingerLift = {
                                 viewModel.onTouchSelectionFingerLift(pageIdx)
@@ -376,12 +410,12 @@ fun MobilePdfViewer(
                         )
                         .testTag("viewer_pdf_pages_horizontal_pager"),
                     contentPadding = PaddingValues(
-                        start = 16.dp,
-                        end = 16.dp,
-                        top = 92.dp,
-                        bottom = 175.dp
+                        start = 14.dp,
+                        end = 14.dp,
+                        top = 84.dp,
+                        bottom = 112.dp
                     ),
-                    pageSpacing = 16.dp
+                    pageSpacing = 14.dp
                 ) { pageIdx ->
                     Box(
                         modifier = Modifier.fillMaxSize(),
@@ -390,6 +424,7 @@ fun MobilePdfViewer(
                         PdfPageLayer(
                             pageIndex = pageIdx,
                             pageBitmap = pageBitmaps[pageIdx],
+                            pageAspectRatio = pageAspectRatios[pageIdx] ?: (612f / 792f),
                             snapshot = snapshot,
                             dockMode = dockMode,
                             readModeStickyNoteActive = readModeStickyNoteActive,
@@ -400,7 +435,13 @@ fun MobilePdfViewer(
                             searchQuery = searchQuery,
                             touchSelection = if (pageIdx == currentPageIndex) touchSelection else null,
                             selectedExistingMarkup = if (pageIdx == currentPageIndex) selectedExistingMarkup else null,
-                            onTapNeutralSpace = { viewModel.toggleChromelessReading() },
+                            onTapNeutralSpace = {
+                                if (activeBottomDrawer != null) {
+                                    activeBottomDrawer = null
+                                } else {
+                                    viewModel.toggleChromelessReading()
+                                }
+                            },
                             onDoubleTapZoom = { viewModel.toggleSmartZoom() },
                             onSelectWordOrLineAtTap = { pt, selectFullLine ->
                                 viewModel.selectWordOrLineAtTap(pageIdx, pt, selectFullLine)
@@ -408,6 +449,12 @@ fun MobilePdfViewer(
                             onUpdateTouchSelection = { start, end ->
                                 viewModel.onPageScrolled(pageIdx)
                                 viewModel.updateTouchSelectionDrag(pageIdx, start, end)
+                            },
+                            onAdjustLeftHandle = { newLeft ->
+                                viewModel.adjustSelectionLeftHandle(pageIdx, newLeft)
+                            },
+                            onAdjustRightHandle = { newRight ->
+                                viewModel.adjustSelectionRightHandle(pageIdx, newRight)
                             },
                             onSelectionFingerLift = {
                                 viewModel.onTouchSelectionFingerLift(pageIdx)
@@ -559,12 +606,15 @@ fun MobilePdfViewer(
                 },
                 onAskAiAboutSelection = {
                     val selText = touchSelection?.selectedText ?: selectedExistingMarkup?.selectedText ?: ""
-                    val prompt = if (selText.isNotBlank()) {
-                        "Explain and summarize this selected passage: \"${selText.take(160)}\""
-                    } else {
-                        "Summarize the key points on Page ${currentPageIndex + 1}"
+                    activeBottomDrawer = ViewerSlideDrawer.AI_ASSISTANT
+                    if (isGeminiApiKeyConfigured) {
+                        val prompt = if (selText.isNotBlank()) {
+                            "Explain and summarize this selected passage: \"${selText.take(160)}\""
+                        } else {
+                            "Summarize the key points on Page ${currentPageIndex + 1}"
+                        }
+                        viewModel.askDocumentAiAssistant(prompt)
                     }
-                    viewModel.askDocumentAiAssistant(prompt)
                 },
                 onSyncVisionOcr = {
                     viewModel.clearTouchSelection()
@@ -606,7 +656,11 @@ fun MobilePdfViewer(
                     onRedo = { viewModel.redo() },
                     onToggleReflow = { viewModel.setReflowMode(true) },
                     onToggleNightMode = {
-                        val next = if (glass.isDark) GlassThemeMode.LIGHT_ALABASTER else GlassThemeMode.DARK_OBSIDIAN
+                        val next = when (appSettings.themeMode) {
+                            GlassThemeMode.LIGHT_ALABASTER -> GlassThemeMode.AMOLED_BLACK
+                            GlassThemeMode.AMOLED_BLACK -> GlassThemeMode.DARK_OBSIDIAN
+                            else -> GlassThemeMode.LIGHT_ALABASTER
+                        }
                         viewModel.setThemeMode(next)
                     },
                     onCyclePaperTint = {
@@ -665,7 +719,8 @@ fun MobilePdfViewer(
             }
         }
 
-        // FLOATING THUMB-ZONE BOTTOM TOOL DOCK & SECONDARY SUB-TOOLBAR PILL
+        // MINIMALISTIC COMPACT FLOATING BOTTOM BAR + ON-DEMAND SLIDE-OUT GLASS DRAWERS
+        // Keeps ~88% of the PDF reading viewport completely unobstructed!
         AnimatedVisibility(
             visible = !isChromeless && !isReflowMode,
             enter = fadeIn() + slideInVertically(initialOffsetY = { it }),
@@ -681,150 +736,241 @@ fun MobilePdfViewer(
                 horizontalAlignment = Alignment.CenterHorizontally,
                 verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                // Row A: Floating Page Counter Pill (opens Navigator Sheet) + Zoom Badge + Properties Orb
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
+                // Slide-Out Drawers (only shown on demand when user taps Tools, AI, or View)
+                AnimatedVisibility(
+                    visible = activeBottomDrawer != null,
+                    enter = fadeIn() + slideInVertically(initialOffsetY = { it / 2 }),
+                    exit = fadeOut() + slideOutVertically(targetOffsetY = { it / 2 })
                 ) {
-                    GlassPill(
-                        onClick = { viewModel.setNavigatorSheetVisible(true) },
-                        modifier = Modifier.testTag("viewer_page_navigator_pill")
-                    ) {
-                        Icon(Icons.Default.GridView, null, tint = glass.accent, modifier = Modifier.size(16.dp))
-                        Spacer(Modifier.width(6.dp))
-                        Text(
-                            text = "${currentPageIndex + 1} / ${doc.pageCount}",
-                            fontFamily = JetBrainsTabularFamily,
-                            fontWeight = FontWeight.Bold,
-                            style = MaterialTheme.typography.labelLarge,
-                            color = glass.primaryText
-                        )
-                    }
-
-                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                        GlassPill(
-                            onClick = { viewModel.setZoomScale(zoomScale - 0.25f) },
-                            contentPaddingHorizontal = 10.dp,
-                            contentPaddingVertical = 7.dp
-                        ) {
-                            Icon(Icons.Default.ZoomOut, "Zoom out", tint = glass.primaryText, modifier = Modifier.size(16.dp))
-                        }
-                        GlassPill(
-                            onClick = { viewModel.toggleSmartZoom() },
-                            contentPaddingHorizontal = 10.dp,
-                            contentPaddingVertical = 7.dp,
-                            modifier = Modifier.testTag("viewer_zoom_badge_pill")
-                        ) {
-                            Text(
-                                text = "${(zoomScale * 100).toInt()}%",
-                                fontFamily = JetBrainsTabularFamily,
-                                style = MaterialTheme.typography.labelSmall,
-                                color = glass.primaryText
+                    when (activeBottomDrawer) {
+                        ViewerSlideDrawer.TOOLS -> {
+                            ToolsSlideOutGlassDrawer(
+                                dockMode = dockMode,
+                                readModeStickyNoteActive = readModeStickyNoteActive,
+                                activeMarkupStyle = activeMarkupStyle,
+                                activeColorHex = activeColorHex,
+                                instantHighlightOnDrag = appSettings.instantHighlightOnDrag,
+                                activeDrawTool = activeDrawTool,
+                                activeEditSubTool = activeEditSubTool,
+                                onSelectFluorescentColor = { hex ->
+                                    viewModel.setActiveColorHex(hex)
+                                    viewModel.setViewerDockMode(ViewerDockMode.ANNOTATE)
+                                    readModeStickyNoteActive = false
+                                    activeBottomDrawer = null
+                                },
+                                onSelectMarkupStyle = { style ->
+                                    viewModel.setActiveMarkupStyle(style)
+                                    viewModel.setViewerDockMode(ViewerDockMode.ANNOTATE)
+                                    readModeStickyNoteActive = false
+                                    activeBottomDrawer = null
+                                },
+                                onToggleInstantHighlight = {
+                                    viewModel.setInstantHighlightOnDrag(!appSettings.instantHighlightOnDrag)
+                                },
+                                onOpenPropertiesSheet = {
+                                    activeBottomDrawer = null
+                                    viewModel.setPropertiesSheetVisible(true)
+                                },
+                                onQuickDropStickyNote = {
+                                    activeBottomDrawer = null
+                                    forceStickyNotePlacement = true
+                                    pendingPlacementPoint = NormalizedPoint(0.5f, 0.42f)
+                                    pendingPlacementText = ""
+                                },
+                                onToggleTapStickyNoteMode = {
+                                    readModeStickyNoteActive = !readModeStickyNoteActive
+                                    viewModel.setViewerDockMode(ViewerDockMode.READ)
+                                    activeBottomDrawer = null
+                                },
+                                onSelectDrawTool = { tool ->
+                                    readModeStickyNoteActive = false
+                                    viewModel.setActiveDrawTool(tool)
+                                    viewModel.setViewerDockMode(ViewerDockMode.DRAW)
+                                    activeBottomDrawer = null
+                                },
+                                onSelectEditSubTool = { subTool ->
+                                    readModeStickyNoteActive = false
+                                    viewModel.setActiveEditSubTool(subTool)
+                                    viewModel.setViewerDockMode(ViewerDockMode.EDIT)
+                                    activeBottomDrawer = null
+                                    when (subTool) {
+                                        EditSubTool.IMAGE_STAMP -> viewModel.setPhotoStampPickerSheetVisible(true)
+                                        EditSubTool.AI_STUDIO_STAMP -> viewModel.setAiStudioSheetVisible(true)
+                                        else -> {}
+                                    }
+                                },
+                                onOpenSignatureModal = {
+                                    activeBottomDrawer = null
+                                    viewModel.setSignatureModalVisible(true)
+                                },
+                                onStampQuickSignature = {
+                                    activeBottomDrawer = null
+                                    savedSignatures.firstOrNull()?.let { viewModel.stampSavedSignatureOnCurrentPage(it) }
+                                        ?: viewModel.setSignatureModalVisible(true)
+                                },
+                                onAddAcroFormField = { fieldType, defaultLabel ->
+                                    activeBottomDrawer = null
+                                    viewModel.addAcroFormField(
+                                        targetDoc = doc,
+                                        pageIndex = currentPageIndex,
+                                        type = fieldType,
+                                        label = defaultLabel
+                                    )
+                                },
+                                onOpenFillAndSignHub = {
+                                    activeBottomDrawer = null
+                                    viewModel.launchProWorkflow(ProToolWorkflow.FILL_AND_SIGN)
+                                },
+                                onClose = { activeBottomDrawer = null }
                             )
                         }
-                        GlassPill(
-                            onClick = { viewModel.setZoomScale(zoomScale + 0.25f) },
-                            contentPaddingHorizontal = 10.dp,
-                            contentPaddingVertical = 7.dp
-                        ) {
-                            Icon(Icons.Default.ZoomIn, "Zoom in", tint = glass.primaryText, modifier = Modifier.size(16.dp))
-                        }
-                    }
 
-                    GlassPill(
-                        onClick = { viewModel.setPropertiesSheetVisible(true) },
-                        modifier = Modifier.testTag("viewer_properties_sheet_button")
-                    ) {
-                        Box(
-                            modifier = Modifier
-                                .size(16.dp)
-                                .clip(CircleShape)
-                                .background(parseComposeHex(activeColorHex, Color(0xFFE6C26E)))
-                                .border(1.dp, Color.White, CircleShape)
-                        )
-                        Spacer(Modifier.width(6.dp))
-                        Text("Style", style = MaterialTheme.typography.labelLarge, color = glass.primaryText)
+                        ViewerSlideDrawer.AI_ASSISTANT -> {
+                            AiAssistantSlideOutGlassDrawer(
+                                isApiKeyConfigured = isGeminiApiKeyConfigured,
+                                maskedApiKey = maskedGeminiApiKey,
+                                apiKeyVerificationState = apiKeyVerificationState,
+                                onVerifyAndActivateKey = { viewModel.saveAndVerifyGeminiApiKey(it) },
+                                onRemoveApiKey = { viewModel.clearGeminiApiKey() },
+                                query = aiAssistantQuery,
+                                onQueryChange = { viewModel.setAiAssistantQuery(it) },
+                                preferredLanguage = appSettings.preferredAiLanguage,
+                                customLanguage = appSettings.customAiLanguage,
+                                effectiveLanguageLabel = appSettings.effectiveAiLanguageLabel,
+                                effectiveLanguageBadge = appSettings.effectiveAiLanguageBadge,
+                                onSelectLanguage = { viewModel.setPreferredAiLanguage(it) },
+                                onCustomLanguageChange = { viewModel.setCustomAiLanguage(it) },
+                                uiState = aiAssistantUiState,
+                                currentPage = currentPageIndex + 1,
+                                onSendQuery = { customPrompt ->
+                                    viewModel.askDocumentAiAssistant(customPrompt)
+                                },
+                                onCopyReply = { text ->
+                                    val clipboard = context.getSystemService(android.content.Context.CLIPBOARD_SERVICE) as? android.content.ClipboardManager
+                                    clipboard?.setPrimaryClip(android.content.ClipData.newPlainText("AI Document Reply", text))
+                                    viewModel.showDynamicToast("AI response copied")
+                                },
+                                onPinReplyAsSticky = { text ->
+                                    viewModel.pinAiReplyAsStickyNote(text)
+                                    activeBottomDrawer = null
+                                },
+                                onDismissReply = { viewModel.dismissAiAssistantReply() },
+                                onClose = { activeBottomDrawer = null }
+                            )
+                        }
+
+                        ViewerSlideDrawer.VIEW_DISPLAY -> {
+                            ViewDisplaySlideOutGlassDrawer(
+                                currentPage = currentPageIndex + 1,
+                                totalPages = doc.pageCount,
+                                zoomScale = zoomScale,
+                                paperTint = appSettings.paperTint,
+                                themeMode = appSettings.themeMode,
+                                scrollDirection = appSettings.scrollDirection,
+                                onZoomOut = { viewModel.setZoomScale(zoomScale - 0.25f) },
+                                onToggleSmartZoom = { viewModel.toggleSmartZoom() },
+                                onZoomIn = { viewModel.setZoomScale(zoomScale + 0.25f) },
+                                onSelectPaperTint = { viewModel.setPdfCanvasPaperTint(it) },
+                                onSelectThemeMode = { viewModel.setThemeMode(it) },
+                                onSelectScrollDirection = { viewModel.setPageScrollDirection(it) },
+                                onOpenReflow = {
+                                    activeBottomDrawer = null
+                                    viewModel.setReflowMode(true)
+                                },
+                                onOpenNavigator = {
+                                    activeBottomDrawer = null
+                                    viewModel.setNavigatorSheetVisible(true)
+                                },
+                                onOpenPageOrganizer = {
+                                    activeBottomDrawer = null
+                                    viewModel.setViewerDockMode(ViewerDockMode.PAGES)
+                                },
+                                onClose = { activeBottomDrawer = null }
+                            )
+                        }
+
+                        null -> {}
                     }
                 }
 
-                // Row B: Secondary Floating Glass Sub-Toolbar Pill (contextual to active mode, including Read Mode!)
-                SecondaryModeSubToolbarPill(
-                    dockMode = dockMode,
-                    readModeStickyNoteActive = readModeStickyNoteActive,
-                    activeMarkupStyle = activeMarkupStyle,
-                    instantHighlightOnDrag = appSettings.instantHighlightOnDrag,
-                    activeDrawTool = activeDrawTool,
-                    activeEditSubTool = activeEditSubTool,
-                    onToggleReadModeStickyNote = {
-                        readModeStickyNoteActive = !readModeStickyNoteActive
-                    },
-                    onQuickDropStickyNoteInReadMode = {
-                        forceStickyNotePlacement = true
-                        pendingPlacementPoint = NormalizedPoint(0.5f, 0.42f)
-                        pendingPlacementText = ""
-                    },
-                    onSelectMarkupStyle = { viewModel.setActiveMarkupStyle(it) },
-                    onToggleInstantHighlight = {
-                        viewModel.setInstantHighlightOnDrag(!appSettings.instantHighlightOnDrag)
-                    },
-                    onSelectDrawTool = { viewModel.setActiveDrawTool(it) },
-                    onSelectEditSubTool = { subTool ->
-                        viewModel.setActiveEditSubTool(subTool)
-                        when (subTool) {
-                            EditSubTool.IMAGE_STAMP -> viewModel.setPhotoStampPickerSheetVisible(true)
-                            EditSubTool.AI_STUDIO_STAMP -> viewModel.setAiStudioSheetVisible(true)
-                            else -> {}
+                // Slim Active-Tool Chip (only shown when actively annotating/drawing/editing/sticky-noting)
+                val showActiveToolPill = activeBottomDrawer == null &&
+                    (dockMode != ViewerDockMode.READ || readModeStickyNoteActive)
+                if (showActiveToolPill) {
+                    val modeBadgeText = when {
+                        readModeStickyNoteActive -> "Sticky Note • Tap Page"
+                        dockMode == ViewerDockMode.ANNOTATE -> "Highlight (${activeMarkupStyle.label})"
+                        dockMode == ViewerDockMode.DRAW -> "Draw • ${activeDrawTool.label}"
+                        dockMode == ViewerDockMode.EDIT -> "Edit • ${activeEditSubTool.label}"
+                        dockMode == ViewerDockMode.SIGN -> "Fill & Sign"
+                        else -> dockMode.label
+                    }
+                    GlassSurface(
+                        shape = RoundedCornerShape(50),
+                        elevation = 12.dp,
+                        modifier = Modifier.testTag("viewer_active_tool_chip")
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(14.dp)
+                                    .clip(CircleShape)
+                                    .background(parseComposeHex(activeColorHex, Color(0xFFFFF01F)))
+                                    .border(1.dp, Color.White, CircleShape)
+                                    .clickable { viewModel.setPropertiesSheetVisible(true) }
+                            )
+                            Text(
+                                text = modeBadgeText,
+                                style = MaterialTheme.typography.labelLarge,
+                                color = glass.primaryText
+                            )
+                            GlassPill(
+                                onClick = {
+                                    readModeStickyNoteActive = false
+                                    viewModel.setViewerDockMode(ViewerDockMode.READ)
+                                },
+                                contentPaddingHorizontal = 10.dp,
+                                contentPaddingVertical = 4.dp,
+                                modifier = Modifier.testTag("viewer_exit_tool_mode_button")
+                            ) {
+                                Text("Done", style = MaterialTheme.typography.labelSmall, color = glass.accent)
+                            }
                         }
-                    },
-                    onOpenSignatureModal = { viewModel.setSignatureModalVisible(true) },
-                    onStampQuickSignature = {
-                        savedSignatures.firstOrNull()?.let { viewModel.stampSavedSignatureOnCurrentPage(it) }
-                            ?: viewModel.setSignatureModalVisible(true)
-                    },
-                    onAddAcroFormField = { fieldType, defaultLabel ->
-                        viewModel.addAcroFormField(
-                            targetDoc = doc,
-                            pageIndex = currentPageIndex,
-                            type = fieldType,
-                            label = defaultLabel
-                        )
-                    },
-                    onOpenFillAndSignHub = {
-                        viewModel.launchProWorkflow(ProToolWorkflow.FILL_AND_SIGN)
                     }
-                )
+                }
 
-                // Row B2: Floating Liquid Glass Document AI Assistant Bar (Input Field + Send Button + Preferred Language Chip)
-                FloatingDocumentAiAssistantBar(
-                    query = aiAssistantQuery,
-                    onQueryChange = { viewModel.setAiAssistantQuery(it) },
-                    preferredLanguage = appSettings.preferredAiLanguage,
-                    onSelectLanguage = { viewModel.setPreferredAiLanguage(it) },
-                    uiState = aiAssistantUiState,
+                // Single Minimalistic 5-Button Floating Bottom Bar
+                CompactMinimalBottomBar(
+                    isHighlightActive = dockMode == ViewerDockMode.ANNOTATE,
+                    activeColorHex = activeColorHex,
+                    isToolsDrawerOpen = activeBottomDrawer == ViewerSlideDrawer.TOOLS,
+                    isAiDrawerOpen = activeBottomDrawer == ViewerSlideDrawer.AI_ASSISTANT,
+                    isAiActive = isGeminiApiKeyConfigured,
+                    isViewDrawerOpen = activeBottomDrawer == ViewerSlideDrawer.VIEW_DISPLAY,
                     currentPage = currentPageIndex + 1,
-                    onSendQuery = { customPrompt ->
-                        viewModel.askDocumentAiAssistant(customPrompt)
-                    },
-                    onCopyReply = { text ->
-                        val clipboard = context.getSystemService(android.content.Context.CLIPBOARD_SERVICE) as? android.content.ClipboardManager
-                        clipboard?.setPrimaryClip(android.content.ClipData.newPlainText("AI Document Reply", text))
-                        viewModel.showDynamicToast("AI response copied")
-                    },
-                    onPinReplyAsSticky = { text ->
-                        viewModel.pinAiReplyAsStickyNote(text)
-                    },
-                    onDismissReply = {
-                        viewModel.dismissAiAssistantReply()
-                    }
-                )
-
-                // Row C: Primary Multi-Mode Bottom Tool Dock (Read, Annotate, Draw, Edit, Sign, Pages)
-                PrimaryBottomToolDock(
-                    activeMode = dockMode,
-                    onSelectMode = {
+                    totalPages = doc.pageCount,
+                    onToggleHighlight = {
+                        activeBottomDrawer = null
                         readModeStickyNoteActive = false
-                        viewModel.setViewerDockMode(it)
+                        val next = if (dockMode == ViewerDockMode.ANNOTATE) ViewerDockMode.READ else ViewerDockMode.ANNOTATE
+                        viewModel.setViewerDockMode(next)
+                    },
+                    onToggleToolsDrawer = {
+                        activeBottomDrawer = if (activeBottomDrawer == ViewerSlideDrawer.TOOLS) null else ViewerSlideDrawer.TOOLS
+                    },
+                    onToggleAiDrawer = {
+                        activeBottomDrawer = if (activeBottomDrawer == ViewerSlideDrawer.AI_ASSISTANT) null else ViewerSlideDrawer.AI_ASSISTANT
+                    },
+                    onOpenPagesNavigator = {
+                        activeBottomDrawer = null
+                        viewModel.setNavigatorSheetVisible(true)
+                    },
+                    onToggleViewDrawer = {
+                        activeBottomDrawer = if (activeBottomDrawer == ViewerSlideDrawer.VIEW_DISPLAY) null else ViewerSlideDrawer.VIEW_DISPLAY
                     }
                 )
             }
@@ -1173,575 +1319,23 @@ private fun ViewerTopGlassHeader(
 }
 
 @Composable
-private fun SecondaryModeSubToolbarPill(
-    dockMode: ViewerDockMode,
-    readModeStickyNoteActive: Boolean = false,
-    activeMarkupStyle: MarkupStyle,
-    instantHighlightOnDrag: Boolean,
-    activeDrawTool: DrawToolType,
-    activeEditSubTool: EditSubTool,
-    onToggleReadModeStickyNote: () -> Unit = {},
-    onQuickDropStickyNoteInReadMode: () -> Unit = {},
-    onSelectMarkupStyle: (MarkupStyle) -> Unit,
-    onToggleInstantHighlight: () -> Unit,
-    onSelectDrawTool: (DrawToolType) -> Unit,
-    onSelectEditSubTool: (EditSubTool) -> Unit,
-    onOpenSignatureModal: () -> Unit,
-    onStampQuickSignature: () -> Unit,
-    onAddAcroFormField: (FormFieldType, String) -> Unit = { _, _ -> },
-    onOpenFillAndSignHub: () -> Unit = {}
-) {
-    val glass = LocalLiquidGlass.current
-    if (dockMode == ViewerDockMode.PAGES) return
-
-    GlassSurface(
-        modifier = Modifier
-            .fillMaxWidth()
-            .testTag("viewer_secondary_sub_toolbar"),
-        shape = RoundedCornerShape(50),
-        elevation = 14.dp
-    ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .horizontalScroll(rememberScrollState())
-                .padding(horizontal = 10.dp, vertical = 6.dp),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            when (dockMode) {
-                ViewerDockMode.READ -> {
-                    GlassPill(
-                        onClick = { if (readModeStickyNoteActive) onToggleReadModeStickyNote() },
-                        isSelected = !readModeStickyNoteActive,
-                        contentPaddingHorizontal = 12.dp,
-                        contentPaddingVertical = 8.dp,
-                        modifier = Modifier.testTag("read_mode_select_highlight_pill")
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.Highlight,
-                            contentDescription = null,
-                            tint = if (!readModeStickyNoteActive) glass.accent else glass.secondaryText,
-                            modifier = Modifier.size(15.dp)
-                        )
-                        Spacer(Modifier.width(5.dp))
-                        Text("Select & Highlight", style = MaterialTheme.typography.labelLarge, color = glass.primaryText)
-                    }
-
-                    GlassPill(
-                        onClick = onToggleReadModeStickyNote,
-                        isSelected = readModeStickyNoteActive,
-                        contentPaddingHorizontal = 12.dp,
-                        contentPaddingVertical = 8.dp,
-                        modifier = Modifier.testTag("read_mode_sticky_note_pill")
-                    ) {
-                        Icon(
-                            imageVector = Icons.AutoMirrored.Filled.Comment,
-                            contentDescription = null,
-                            tint = glass.goldBadge,
-                            modifier = Modifier.size(15.dp)
-                        )
-                        Spacer(Modifier.width(5.dp))
-                        Text(
-                            text = if (readModeStickyNoteActive) "Tap Page for Sticky Note" else "Sticky Note Tool",
-                            style = MaterialTheme.typography.labelLarge,
-                            color = glass.primaryText
-                        )
-                    }
-
-                    GlassPill(
-                        onClick = onQuickDropStickyNoteInReadMode,
-                        contentPaddingHorizontal = 12.dp,
-                        contentPaddingVertical = 8.dp,
-                        modifier = Modifier.testTag("read_mode_quick_add_sticky_button")
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.Add,
-                            contentDescription = null,
-                            tint = glass.accent,
-                            modifier = Modifier.size(15.dp)
-                        )
-                        Spacer(Modifier.width(4.dp))
-                        Text("+ Add Sticky Note", style = MaterialTheme.typography.labelLarge, color = glass.primaryText)
-                    }
-                }
-                ViewerDockMode.ANNOTATE -> {
-                    GlassPill(
-                        onClick = onToggleInstantHighlight,
-                        isSelected = instantHighlightOnDrag,
-                        contentPaddingHorizontal = 11.dp,
-                        contentPaddingVertical = 8.dp,
-                        modifier = Modifier.testTag("toggle_instant_highlight_pill")
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.Bolt,
-                            contentDescription = null,
-                            tint = if (instantHighlightOnDrag) glass.goldBadge else glass.secondaryText,
-                            modifier = Modifier.size(15.dp)
-                        )
-                        Spacer(Modifier.width(4.dp))
-                        Text(
-                            text = if (instantHighlightOnDrag) "Instant: ON" else "Handles Mode",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = glass.primaryText
-                        )
-                    }
-                    MarkupStyle.entries.forEach { style ->
-                        GlassPill(
-                            onClick = { onSelectMarkupStyle(style) },
-                            isSelected = activeMarkupStyle == style,
-                            contentPaddingHorizontal = 12.dp,
-                            contentPaddingVertical = 8.dp
-                        ) {
-                            Text(style.label, style = MaterialTheme.typography.labelLarge, color = glass.primaryText)
-                        }
-                    }
-                }
-                ViewerDockMode.DRAW -> {
-                    DrawToolType.entries.forEach { tool ->
-                        GlassPill(
-                            onClick = { onSelectDrawTool(tool) },
-                            isSelected = activeDrawTool == tool,
-                            contentPaddingHorizontal = 12.dp,
-                            contentPaddingVertical = 8.dp
-                        ) {
-                            Text(tool.label, style = MaterialTheme.typography.labelLarge, color = glass.primaryText)
-                        }
-                    }
-                }
-                ViewerDockMode.EDIT -> {
-                    EditSubTool.entries.forEach { sub ->
-                        GlassPill(
-                            onClick = { onSelectEditSubTool(sub) },
-                            isSelected = activeEditSubTool == sub,
-                            contentPaddingHorizontal = 12.dp,
-                            contentPaddingVertical = 8.dp,
-                            modifier = Modifier.testTag("edit_subtool_${sub.name}")
-                        ) {
-                            if (sub == EditSubTool.AI_STUDIO_STAMP) {
-                                Icon(
-                                    imageVector = Icons.Default.AutoAwesome,
-                                    contentDescription = null,
-                                    tint = glass.goldBadge,
-                                    modifier = Modifier.size(15.dp)
-                                )
-                                Spacer(Modifier.width(5.dp))
-                            } else if (sub == EditSubTool.IMAGE_STAMP) {
-                                Icon(
-                                    imageVector = Icons.Default.PhotoLibrary,
-                                    contentDescription = null,
-                                    tint = glass.accent,
-                                    modifier = Modifier.size(15.dp)
-                                )
-                                Spacer(Modifier.width(5.dp))
-                            }
-                            Text(sub.label, style = MaterialTheme.typography.labelLarge, color = glass.primaryText)
-                        }
-                    }
-                }
-                ViewerDockMode.SIGN -> {
-                    GlassPill(
-                        onClick = onOpenSignatureModal,
-                        isSelected = true,
-                        modifier = Modifier.testTag("open_signature_pad_button")
-                    ) {
-                        Icon(Icons.Default.Draw, null, tint = glass.primaryText, modifier = Modifier.size(16.dp))
-                        Spacer(Modifier.width(6.dp))
-                        Text("Signature Pad", style = MaterialTheme.typography.labelLarge, color = glass.primaryText)
-                    }
-                    GlassPill(
-                        onClick = onStampQuickSignature,
-                        modifier = Modifier.testTag("quick_stamp_signature_button")
-                    ) {
-                        Text("Stamp Vault Sig", style = MaterialTheme.typography.labelLarge, color = glass.primaryText)
-                    }
-                    GlassPill(
-                        onClick = { onAddAcroFormField(FormFieldType.TEXT, "Signatory / Notes Field") },
-                        modifier = Modifier.testTag("sign_add_text_field_button")
-                    ) {
-                        Icon(Icons.Default.TextFields, null, tint = glass.accent, modifier = Modifier.size(15.dp))
-                        Spacer(Modifier.width(4.dp))
-                        Text("+ Text Field", style = MaterialTheme.typography.labelLarge, color = glass.primaryText)
-                    }
-                    GlassPill(
-                        onClick = { onAddAcroFormField(FormFieldType.CHECKBOX, "Approval Check") },
-                        modifier = Modifier.testTag("sign_add_checkbox_field_button")
-                    ) {
-                        Icon(Icons.Default.CheckBox, null, tint = glass.accent, modifier = Modifier.size(15.dp))
-                        Spacer(Modifier.width(4.dp))
-                        Text("+ Checkbox", style = MaterialTheme.typography.labelLarge, color = glass.primaryText)
-                    }
-                    GlassPill(
-                        onClick = { onAddAcroFormField(FormFieldType.RADIO, "Disposition Radio Group") },
-                        modifier = Modifier.testTag("sign_add_radio_field_button")
-                    ) {
-                        Icon(Icons.Default.RadioButtonChecked, null, tint = glass.accent, modifier = Modifier.size(15.dp))
-                        Spacer(Modifier.width(4.dp))
-                        Text("+ Radio Group", style = MaterialTheme.typography.labelLarge, color = glass.primaryText)
-                    }
-                    GlassPill(
-                        onClick = onOpenFillAndSignHub,
-                        modifier = Modifier.testTag("sign_open_fill_sign_hub_button")
-                    ) {
-                        Text("Fill & Sign Hub", style = MaterialTheme.typography.labelLarge, color = glass.goldBadge)
-                    }
-                }
-                else -> {}
-            }
-        }
-    }
-}
-
-/**
- * Floating Liquid Glass AI Assistant Bar at the bottom of the PDF viewer screen.
- * Includes an input field for queries, a language selector chip (synced with Settings),
- * a Send button, quick prompt pills, and an expandable glass reply card that uses the
- * active PDF's full document context and responds in the user's preferred language.
- */
-@Composable
-private fun FloatingDocumentAiAssistantBar(
-    query: String,
-    onQueryChange: (String) -> Unit,
-    preferredLanguage: AiLanguageOption,
-    onSelectLanguage: (AiLanguageOption) -> Unit,
-    uiState: AiAssistantUiState,
+private fun CompactMinimalBottomBar(
+    isHighlightActive: Boolean,
+    activeColorHex: String,
+    isToolsDrawerOpen: Boolean,
+    isAiDrawerOpen: Boolean,
+    isAiActive: Boolean,
+    isViewDrawerOpen: Boolean,
     currentPage: Int,
-    onSendQuery: (String?) -> Unit,
-    onCopyReply: (String) -> Unit,
-    onPinReplyAsSticky: (String) -> Unit,
-    onDismissReply: () -> Unit
+    totalPages: Int,
+    onToggleHighlight: () -> Unit,
+    onToggleToolsDrawer: () -> Unit,
+    onToggleAiDrawer: () -> Unit,
+    onOpenPagesNavigator: () -> Unit,
+    onToggleViewDrawer: () -> Unit
 ) {
     val glass = LocalLiquidGlass.current
-    var langMenuExpanded by remember { mutableStateOf(false) }
-
-    Column(
-        modifier = Modifier.fillMaxWidth(),
-        verticalArrangement = Arrangement.spacedBy(6.dp)
-    ) {
-        // Expandable Liquid Glass Response Card when streaming, completed, or error
-        AnimatedVisibility(
-            visible = uiState !is AiAssistantUiState.Idle,
-            enter = fadeIn() + slideInVertically(initialOffsetY = { it / 2 }),
-            exit = fadeOut() + slideOutVertically(targetOffsetY = { it / 2 })
-        ) {
-            GlassSurface(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .testTag("viewer_ai_assistant_reply_card"),
-                shape = RoundedCornerShape(24.dp),
-                elevation = 18.dp
-            ) {
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 14.dp, vertical = 12.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    val badgeText = when (uiState) {
-                        is AiAssistantUiState.Streaming -> uiState.contextBadge
-                        is AiAssistantUiState.Success -> uiState.contextBadge
-                        is AiAssistantUiState.Error -> "AI Assistant • ${preferredLanguage.shortCode}"
-                        AiAssistantUiState.Idle -> ""
-                    }
-                    val activeQuestion = when (uiState) {
-                        is AiAssistantUiState.Streaming -> uiState.query
-                        is AiAssistantUiState.Success -> uiState.query
-                        is AiAssistantUiState.Error -> uiState.query
-                        AiAssistantUiState.Idle -> ""
-                    }
-
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(6.dp),
-                            modifier = Modifier.weight(1f)
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.AutoAwesome,
-                                contentDescription = null,
-                                tint = glass.goldBadge,
-                                modifier = Modifier.size(16.dp)
-                            )
-                            Text(
-                                text = activeQuestion,
-                                style = MaterialTheme.typography.labelLarge,
-                                fontWeight = FontWeight.SemiBold,
-                                color = glass.primaryText,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                                modifier = Modifier.weight(1f, fill = false)
-                            )
-                            if (badgeText.isNotBlank()) {
-                                Box(
-                                    modifier = Modifier
-                                        .clip(RoundedCornerShape(50))
-                                        .background(glass.accentSoft)
-                                        .padding(horizontal = 8.dp, vertical = 2.dp)
-                                ) {
-                                    Text(
-                                        text = badgeText,
-                                        fontFamily = JetBrainsTabularFamily,
-                                        style = MaterialTheme.typography.labelSmall,
-                                        color = glass.accent
-                                    )
-                                }
-                            }
-                        }
-
-                        IconButton(
-                            onClick = onDismissReply,
-                            modifier = Modifier
-                                .size(26.dp)
-                                .testTag("viewer_ai_reply_close_button")
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.Close,
-                                contentDescription = "Dismiss AI Reply",
-                                tint = glass.secondaryText,
-                                modifier = Modifier.size(16.dp)
-                            )
-                        }
-                    }
-
-                    when (uiState) {
-                        is AiAssistantUiState.Streaming -> {
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(8.dp)
-                            ) {
-                                CircularProgressIndicator(
-                                    modifier = Modifier.size(15.dp),
-                                    strokeWidth = 2.dp,
-                                    color = glass.accent
-                                )
-                                Text(
-                                    text = "Synthesizing in ${preferredLanguage.label} (${preferredLanguage.nativeName})…",
-                                    fontFamily = JetBrainsTabularFamily,
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = glass.accent
-                                )
-                            }
-                            Text(
-                                text = uiState.partialText,
-                                style = MaterialTheme.typography.bodyMedium,
-                                color = glass.primaryText,
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .heightIn(max = 150.dp)
-                                    .verticalScroll(rememberScrollState())
-                            )
-                        }
-
-                        is AiAssistantUiState.Success -> {
-                            Text(
-                                text = uiState.answerText,
-                                style = MaterialTheme.typography.bodyMedium,
-                                color = glass.primaryText,
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .heightIn(max = 175.dp)
-                                    .verticalScroll(rememberScrollState())
-                                    .testTag("viewer_ai_assistant_answer_text")
-                            )
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .horizontalScroll(rememberScrollState()),
-                                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                GlassPill(
-                                    onClick = { onCopyReply(uiState.answerText) },
-                                    contentPaddingHorizontal = 10.dp,
-                                    contentPaddingVertical = 6.dp,
-                                    modifier = Modifier.testTag("viewer_ai_copy_reply_button")
-                                ) {
-                                    Icon(Icons.Default.ContentCopy, null, tint = glass.accent, modifier = Modifier.size(14.dp))
-                                    Spacer(Modifier.width(4.dp))
-                                    Text("Copy", style = MaterialTheme.typography.labelSmall, color = glass.primaryText)
-                                }
-                                GlassPill(
-                                    onClick = { onPinReplyAsSticky(uiState.answerText) },
-                                    contentPaddingHorizontal = 10.dp,
-                                    contentPaddingVertical = 6.dp,
-                                    modifier = Modifier.testTag("viewer_ai_pin_sticky_button")
-                                ) {
-                                    Icon(Icons.Default.PushPin, null, tint = glass.goldBadge, modifier = Modifier.size(14.dp))
-                                    Spacer(Modifier.width(4.dp))
-                                    Text("Pin as Sticky Note", style = MaterialTheme.typography.labelSmall, color = glass.primaryText)
-                                }
-                                GlassPill(
-                                    onClick = { onSendQuery("Summarize Page $currentPage action items and key metrics") },
-                                    contentPaddingHorizontal = 10.dp,
-                                    contentPaddingVertical = 6.dp
-                                ) {
-                                    Text("Action Items", style = MaterialTheme.typography.labelSmall, color = glass.primaryText)
-                                }
-                            }
-                        }
-
-                        is AiAssistantUiState.Error -> {
-                            Text(
-                                text = uiState.message,
-                                style = MaterialTheme.typography.bodyMedium,
-                                color = MaterialTheme.colorScheme.error
-                            )
-                        }
-
-                        AiAssistantUiState.Idle -> {}
-                    }
-                }
-            }
-        }
-
-        // Compact Floating Liquid Glass AI Input Bar
-        GlassSurface(
-            modifier = Modifier
-                .fillMaxWidth()
-                .testTag("viewer_ai_assistant_bar"),
-            shape = RoundedCornerShape(50),
-            elevation = 16.dp
-        ) {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 10.dp, vertical = 6.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                Icon(
-                    imageVector = Icons.Default.AutoAwesome,
-                    contentDescription = "Document AI Assistant",
-                    tint = glass.goldBadge,
-                    modifier = Modifier
-                        .padding(start = 4.dp)
-                        .size(18.dp)
-                )
-
-                // Preferred Language Selector Chip
-                Box {
-                    GlassPill(
-                        onClick = { langMenuExpanded = true },
-                        contentPaddingHorizontal = 8.dp,
-                        contentPaddingVertical = 5.dp,
-                        modifier = Modifier.testTag("viewer_ai_language_chip")
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.Language,
-                            contentDescription = "Preferred AI Language",
-                            tint = glass.accent,
-                            modifier = Modifier.size(14.dp)
-                        )
-                        Spacer(Modifier.width(4.dp))
-                        Text(
-                            text = preferredLanguage.shortCode,
-                            fontFamily = JetBrainsTabularFamily,
-                            fontWeight = FontWeight.Bold,
-                            style = MaterialTheme.typography.labelSmall,
-                            color = glass.primaryText
-                        )
-                    }
-
-                    DropdownMenu(
-                        expanded = langMenuExpanded,
-                        onDismissRequest = { langMenuExpanded = false }
-                    ) {
-                        AiLanguageOption.entries.forEach { langOpt ->
-                            DropdownMenuItem(
-                                text = {
-                                    Text("${langOpt.label} (${langOpt.nativeName})")
-                                },
-                                onClick = {
-                                    langMenuExpanded = false
-                                    onSelectLanguage(langOpt)
-                                }
-                            )
-                        }
-                    }
-                }
-
-                // Query Input Field
-                Box(
-                    modifier = Modifier
-                        .weight(1f)
-                        .padding(vertical = 4.dp),
-                    contentAlignment = Alignment.CenterStart
-                ) {
-                    if (query.isEmpty()) {
-                        Text(
-                            text = "Ask AI about Page $currentPage (${preferredLanguage.label})…",
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = glass.mutedText,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                    }
-                    BasicTextField(
-                        value = query,
-                        onValueChange = onQueryChange,
-                        textStyle = MaterialTheme.typography.bodyMedium.copy(color = glass.primaryText),
-                        cursorBrush = SolidColor(glass.accent),
-                        singleLine = true,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .testTag("viewer_ai_assistant_input")
-                    )
-                }
-
-                // Quick Summarize Pill when input is empty
-                if (query.isBlank() && uiState is AiAssistantUiState.Idle) {
-                    GlassPill(
-                        onClick = {
-                            onSendQuery("Summarize the key points and details on Page $currentPage of this PDF.")
-                        },
-                        contentPaddingHorizontal = 9.dp,
-                        contentPaddingVertical = 5.dp,
-                        modifier = Modifier.testTag("viewer_ai_quick_summarize_pill")
-                    ) {
-                        Text(
-                            text = "Summarize",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = glass.accent
-                        )
-                    }
-                }
-
-                // Send Query Button
-                GlassPill(
-                    onClick = {
-                        if (query.isNotBlank()) {
-                            onSendQuery(null)
-                        } else {
-                            onSendQuery("Summarize the key points and findings on Page $currentPage.")
-                        }
-                    },
-                    isSelected = true,
-                    contentPaddingHorizontal = 11.dp,
-                    contentPaddingVertical = 7.dp,
-                    modifier = Modifier.testTag("viewer_ai_assistant_send_button")
-                ) {
-                    Icon(
-                        imageVector = Icons.AutoMirrored.Filled.Send,
-                        contentDescription = "Send query to AI Assistant",
-                        tint = glass.primaryText,
-                        modifier = Modifier.size(16.dp)
-                    )
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun PrimaryBottomToolDock(
-    activeMode: ViewerDockMode,
-    onSelectMode: (ViewerDockMode) -> Unit
-) {
-    val glass = LocalLiquidGlass.current
+    val highlightColor = parseComposeHex(activeColorHex, Color(0xFFFFF01F))
 
     GlassSurface(
         modifier = Modifier
@@ -1757,42 +1351,895 @@ private fun PrimaryBottomToolDock(
             horizontalArrangement = Arrangement.SpaceEvenly,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            ViewerDockMode.entries.forEach { mode ->
-                val isSelected = activeMode == mode
-                val icon = when (mode) {
-                    ViewerDockMode.READ -> Icons.Default.Visibility
-                    ViewerDockMode.ANNOTATE -> Icons.Default.Highlight
-                    ViewerDockMode.DRAW -> Icons.Default.Brush
-                    ViewerDockMode.EDIT -> Icons.Default.TextFields
-                    ViewerDockMode.SIGN -> Icons.Default.Draw
-                    ViewerDockMode.PAGES -> Icons.Default.GridView
+            // 1. Highlight Toggle
+            GlassPill(
+                onClick = onToggleHighlight,
+                isSelected = isHighlightActive,
+                elevation = if (isHighlightActive) 6.dp else 0.dp,
+                contentPaddingHorizontal = 8.dp,
+                contentPaddingVertical = 8.dp,
+                modifier = Modifier
+                    .weight(1f)
+                    .testTag("dock_mode_ANNOTATE")
+            ) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Icon(
+                        imageVector = Icons.Default.Highlight,
+                        contentDescription = "Highlight",
+                        tint = if (isHighlightActive) highlightColor else glass.secondaryText,
+                        modifier = Modifier.size(19.dp)
+                    )
+                    Spacer(Modifier.height(2.dp))
+                    Text(
+                        text = "Highlight",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = if (isHighlightActive) glass.primaryText else glass.secondaryText,
+                        maxLines = 1
+                    )
+                }
+            }
+
+            // 2. Slide-Out Tools Drawer
+            GlassPill(
+                onClick = onToggleToolsDrawer,
+                isSelected = isToolsDrawerOpen,
+                elevation = if (isToolsDrawerOpen) 6.dp else 0.dp,
+                contentPaddingHorizontal = 8.dp,
+                contentPaddingVertical = 8.dp,
+                modifier = Modifier
+                    .weight(1f)
+                    .testTag("dock_open_tools_drawer")
+            ) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Icon(
+                        imageVector = Icons.Default.Brush,
+                        contentDescription = "Tools",
+                        tint = if (isToolsDrawerOpen) glass.accent else glass.secondaryText,
+                        modifier = Modifier.size(19.dp)
+                    )
+                    Spacer(Modifier.height(2.dp))
+                    Text(
+                        text = "Tools",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = if (isToolsDrawerOpen) glass.primaryText else glass.secondaryText,
+                        maxLines = 1
+                    )
+                }
+            }
+
+            // 3. Slide-Out AI Assistant Drawer (shows Key badge if locked, Gold spark if active)
+            GlassPill(
+                onClick = onToggleAiDrawer,
+                isSelected = isAiDrawerOpen,
+                elevation = if (isAiDrawerOpen) 6.dp else 0.dp,
+                contentPaddingHorizontal = 8.dp,
+                contentPaddingVertical = 8.dp,
+                modifier = Modifier
+                    .weight(1f)
+                    .testTag("dock_open_ai_drawer")
+            ) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Icon(
+                        imageVector = if (isAiActive) Icons.Default.AutoAwesome else Icons.Default.Key,
+                        contentDescription = "AI Assistant",
+                        tint = if (isAiActive) glass.goldBadge else glass.secondaryText,
+                        modifier = Modifier.size(19.dp)
+                    )
+                    Spacer(Modifier.height(2.dp))
+                    Text(
+                        text = "AI",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = if (isAiDrawerOpen) glass.primaryText else glass.secondaryText,
+                        maxLines = 1
+                    )
+                }
+            }
+
+            // 4. Pages Counter & Navigator
+            GlassPill(
+                onClick = onOpenPagesNavigator,
+                isSelected = false,
+                elevation = 0.dp,
+                contentPaddingHorizontal = 8.dp,
+                contentPaddingVertical = 8.dp,
+                modifier = Modifier
+                    .weight(1f)
+                    .testTag("viewer_page_navigator_pill")
+            ) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Icon(
+                        imageVector = Icons.Default.GridView,
+                        contentDescription = "Pages",
+                        tint = glass.secondaryText,
+                        modifier = Modifier.size(19.dp)
+                    )
+                    Spacer(Modifier.height(2.dp))
+                    Text(
+                        text = "$currentPage/$totalPages",
+                        fontFamily = JetBrainsTabularFamily,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = glass.primaryText,
+                        maxLines = 1
+                    )
+                }
+            }
+
+            // 5. Slide-Out View, Zoom & AMOLED Display Popover
+            GlassPill(
+                onClick = onToggleViewDrawer,
+                isSelected = isViewDrawerOpen,
+                elevation = if (isViewDrawerOpen) 6.dp else 0.dp,
+                contentPaddingHorizontal = 8.dp,
+                contentPaddingVertical = 8.dp,
+                modifier = Modifier
+                    .weight(1f)
+                    .testTag("dock_open_view_drawer")
+            ) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Icon(
+                        imageVector = Icons.Default.Tune,
+                        contentDescription = "View & Display",
+                        tint = if (isViewDrawerOpen) glass.accent else glass.secondaryText,
+                        modifier = Modifier.size(19.dp)
+                    )
+                    Spacer(Modifier.height(2.dp))
+                    Text(
+                        text = "View",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = if (isViewDrawerOpen) glass.primaryText else glass.secondaryText,
+                        maxLines = 1
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ToolsSlideOutGlassDrawer(
+    dockMode: ViewerDockMode,
+    readModeStickyNoteActive: Boolean,
+    activeMarkupStyle: MarkupStyle,
+    activeColorHex: String,
+    instantHighlightOnDrag: Boolean,
+    activeDrawTool: DrawToolType,
+    activeEditSubTool: EditSubTool,
+    onSelectFluorescentColor: (String) -> Unit,
+    onSelectMarkupStyle: (MarkupStyle) -> Unit,
+    onToggleInstantHighlight: () -> Unit,
+    onOpenPropertiesSheet: () -> Unit,
+    onQuickDropStickyNote: () -> Unit,
+    onToggleTapStickyNoteMode: () -> Unit,
+    onSelectDrawTool: (DrawToolType) -> Unit,
+    onSelectEditSubTool: (EditSubTool) -> Unit,
+    onOpenSignatureModal: () -> Unit,
+    onStampQuickSignature: () -> Unit,
+    onAddAcroFormField: (FormFieldType, String) -> Unit,
+    onOpenFillAndSignHub: () -> Unit,
+    onClose: () -> Unit
+) {
+    val glass = LocalLiquidGlass.current
+
+    GlassSurface(
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag("viewer_tools_slide_drawer"),
+        shape = RoundedCornerShape(26.dp),
+        elevation = 22.dp
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .heightIn(max = 360.dp)
+                .verticalScroll(rememberScrollState())
+                .padding(14.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text("PDF Tools", style = MaterialTheme.typography.titleMedium, color = glass.primaryText)
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+                    GlassPill(
+                        onClick = onOpenPropertiesSheet,
+                        contentPaddingHorizontal = 10.dp,
+                        contentPaddingVertical = 5.dp,
+                        modifier = Modifier.testTag("viewer_properties_sheet_button")
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(13.dp)
+                                .clip(CircleShape)
+                                .background(parseComposeHex(activeColorHex, Color(0xFFFFF01F)))
+                                .border(1.dp, Color.White, CircleShape)
+                        )
+                        Spacer(Modifier.width(5.dp))
+                        Text("Style", style = MaterialTheme.typography.labelSmall, color = glass.primaryText)
+                    }
+                    IconButton(onClick = onClose, modifier = Modifier.size(30.dp)) {
+                        Icon(Icons.Default.Close, "Close tools", tint = glass.secondaryText, modifier = Modifier.size(18.dp))
+                    }
+                }
+            }
+
+            // Section 1: Fluorescent Highlighter Colors & Markup Styles
+            Text("Fluorescent Highlighter", style = MaterialTheme.typography.labelLarge, color = glass.secondaryText)
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                FluorescentHighlightSwatches.forEach { swatch ->
+                    val selected = swatch.hex.equals(activeColorHex, ignoreCase = true)
+                    Box(
+                        modifier = Modifier
+                            .size(32.dp)
+                            .shadow(
+                                elevation = if (selected) 10.dp else 3.dp,
+                                shape = CircleShape,
+                                ambientColor = swatch.glowColor,
+                                spotColor = swatch.glowColor
+                            )
+                            .clip(CircleShape)
+                            .background(swatch.color)
+                            .border(
+                                width = if (selected) 2.5.dp else 1.2.dp,
+                                color = if (selected) glass.primaryText else Color.White,
+                                shape = CircleShape
+                            )
+                            .clickable { onSelectFluorescentColor(swatch.hex) }
+                            .testTag("drawer_swatch_${swatch.name.lowercase().replace(" ", "_")}")
+                    )
+                }
+                GlassPill(
+                    onClick = onToggleInstantHighlight,
+                    isSelected = !instantHighlightOnDrag,
+                    contentPaddingHorizontal = 10.dp,
+                    contentPaddingVertical = 6.dp,
+                    modifier = Modifier.testTag("toggle_instant_highlight_pill")
+                ) {
+                    Icon(Icons.Default.Bolt, null, tint = glass.goldBadge, modifier = Modifier.size(14.dp))
+                    Spacer(Modifier.width(4.dp))
+                    Text(
+                        text = if (instantHighlightOnDrag) "Instant" else "Handles",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = glass.primaryText
+                    )
+                }
+            }
+
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                MarkupStyle.entries.forEach { style ->
+                    GlassPill(
+                        onClick = { onSelectMarkupStyle(style) },
+                        isSelected = dockMode == ViewerDockMode.ANNOTATE && activeMarkupStyle == style,
+                        contentPaddingHorizontal = 11.dp,
+                        contentPaddingVertical = 7.dp
+                    ) {
+                        Text(style.label, style = MaterialTheme.typography.labelLarge, color = glass.primaryText)
+                    }
+                }
+            }
+
+            // Section 2: Notes, Text & Stamps
+            Text("Notes & Stamps", style = MaterialTheme.typography.labelLarge, color = glass.secondaryText)
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                GlassPill(
+                    onClick = onQuickDropStickyNote,
+                    contentPaddingHorizontal = 11.dp,
+                    contentPaddingVertical = 7.dp,
+                    modifier = Modifier.testTag("read_mode_quick_add_sticky_button")
+                ) {
+                    Icon(Icons.AutoMirrored.Filled.Comment, null, tint = glass.goldBadge, modifier = Modifier.size(15.dp))
+                    Spacer(Modifier.width(5.dp))
+                    Text("+ Sticky Note", style = MaterialTheme.typography.labelLarge, color = glass.primaryText)
+                }
+                GlassPill(
+                    onClick = onToggleTapStickyNoteMode,
+                    isSelected = readModeStickyNoteActive,
+                    contentPaddingHorizontal = 11.dp,
+                    contentPaddingVertical = 7.dp,
+                    modifier = Modifier.testTag("read_mode_sticky_note_pill")
+                ) {
+                    Text("Tap-to-Stick", style = MaterialTheme.typography.labelLarge, color = glass.primaryText)
+                }
+                EditSubTool.entries.forEach { sub ->
+                    GlassPill(
+                        onClick = { onSelectEditSubTool(sub) },
+                        isSelected = dockMode == ViewerDockMode.EDIT && activeEditSubTool == sub,
+                        contentPaddingHorizontal = 11.dp,
+                        contentPaddingVertical = 7.dp,
+                        modifier = Modifier.testTag("edit_subtool_${sub.name}")
+                    ) {
+                        Text(sub.label, style = MaterialTheme.typography.labelLarge, color = glass.primaryText)
+                    }
+                }
+            }
+
+            // Section 3: Draw & Shapes
+            Text("Draw & Redact", style = MaterialTheme.typography.labelLarge, color = glass.secondaryText)
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                DrawToolType.entries.forEach { tool ->
+                    GlassPill(
+                        onClick = { onSelectDrawTool(tool) },
+                        isSelected = dockMode == ViewerDockMode.DRAW && activeDrawTool == tool,
+                        contentPaddingHorizontal = 11.dp,
+                        contentPaddingVertical = 7.dp
+                    ) {
+                        Text(tool.label, style = MaterialTheme.typography.labelLarge, color = glass.primaryText)
+                    }
+                }
+            }
+
+            // Section 4: Fill & Sign
+            Text("Fill & Sign", style = MaterialTheme.typography.labelLarge, color = glass.secondaryText)
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                GlassPill(
+                    onClick = onOpenSignatureModal,
+                    isSelected = true,
+                    contentPaddingHorizontal = 11.dp,
+                    contentPaddingVertical = 7.dp,
+                    modifier = Modifier.testTag("open_signature_pad_button")
+                ) {
+                    Icon(Icons.Default.Draw, null, tint = glass.primaryText, modifier = Modifier.size(15.dp))
+                    Spacer(Modifier.width(5.dp))
+                    Text("Signature", style = MaterialTheme.typography.labelLarge, color = glass.primaryText)
+                }
+                GlassPill(
+                    onClick = onStampQuickSignature,
+                    contentPaddingHorizontal = 11.dp,
+                    contentPaddingVertical = 7.dp
+                ) {
+                    Text("Vault Sig", style = MaterialTheme.typography.labelLarge, color = glass.primaryText)
+                }
+                GlassPill(
+                    onClick = { onAddAcroFormField(FormFieldType.TEXT, "Signatory / Notes") },
+                    contentPaddingHorizontal = 11.dp,
+                    contentPaddingVertical = 7.dp
+                ) {
+                    Text("+ Text Field", style = MaterialTheme.typography.labelLarge, color = glass.primaryText)
+                }
+                GlassPill(
+                    onClick = { onAddAcroFormField(FormFieldType.CHECKBOX, "Approval Check") },
+                    contentPaddingHorizontal = 11.dp,
+                    contentPaddingVertical = 7.dp
+                ) {
+                    Text("+ Checkbox", style = MaterialTheme.typography.labelLarge, color = glass.primaryText)
+                }
+                GlassPill(
+                    onClick = { onAddAcroFormField(FormFieldType.RADIO, "Status Radio Group") },
+                    contentPaddingHorizontal = 11.dp,
+                    contentPaddingVertical = 7.dp
+                ) {
+                    Text("+ Radio", style = MaterialTheme.typography.labelLarge, color = glass.primaryText)
+                }
+                GlassPill(
+                    onClick = onOpenFillAndSignHub,
+                    contentPaddingHorizontal = 11.dp,
+                    contentPaddingVertical = 7.dp
+                ) {
+                    Text("Fill & Sign Hub", style = MaterialTheme.typography.labelLarge, color = glass.goldBadge)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun AiAssistantSlideOutGlassDrawer(
+    isApiKeyConfigured: Boolean,
+    maskedApiKey: String,
+    apiKeyVerificationState: ApiKeyVerificationState,
+    onVerifyAndActivateKey: (String) -> Unit,
+    onRemoveApiKey: () -> Unit,
+    query: String,
+    onQueryChange: (String) -> Unit,
+    preferredLanguage: AiLanguageOption,
+    customLanguage: String,
+    effectiveLanguageLabel: String,
+    effectiveLanguageBadge: String,
+    onSelectLanguage: (AiLanguageOption) -> Unit,
+    onCustomLanguageChange: (String) -> Unit,
+    uiState: AiAssistantUiState,
+    currentPage: Int,
+    onSendQuery: (String?) -> Unit,
+    onCopyReply: (String) -> Unit,
+    onPinReplyAsSticky: (String) -> Unit,
+    onDismissReply: () -> Unit,
+    onClose: () -> Unit
+) {
+    val glass = LocalLiquidGlass.current
+    var showKeyManage by remember { mutableStateOf(false) }
+    var customLangDraft by remember(customLanguage) { mutableStateOf(customLanguage) }
+
+    GlassSurface(
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag("viewer_ai_assistant_bar"),
+        shape = RoundedCornerShape(26.dp),
+        elevation = 22.dp
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .heightIn(max = 430.dp)
+                .verticalScroll(rememberScrollState())
+                .padding(14.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            // Drawer Header
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(7.dp)
+                ) {
+                    Icon(Icons.Default.AutoAwesome, null, tint = glass.goldBadge, modifier = Modifier.size(18.dp))
+                    Text("Document AI Assistant", style = MaterialTheme.typography.titleMedium, color = glass.primaryText)
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
+                    if (isApiKeyConfigured) {
+                        GlassPill(
+                            onClick = { showKeyManage = !showKeyManage },
+                            contentPaddingHorizontal = 8.dp,
+                            contentPaddingVertical = 4.dp,
+                            modifier = Modifier.testTag("ai_drawer_manage_key_button")
+                        ) {
+                            Icon(Icons.Default.Key, null, tint = glass.accent, modifier = Modifier.size(13.dp))
+                            Spacer(Modifier.width(4.dp))
+                            Text("Key", style = MaterialTheme.typography.labelSmall, color = glass.primaryText)
+                        }
+                    }
+                    IconButton(onClick = onClose, modifier = Modifier.size(30.dp)) {
+                        Icon(Icons.Default.Close, "Close AI drawer", tint = glass.secondaryText, modifier = Modifier.size(18.dp))
+                    }
+                }
+            }
+
+            if (!isApiKeyConfigured || showKeyManage) {
+                GeminiApiKeyActivationCard(
+                    isConfigured = isApiKeyConfigured,
+                    maskedKey = maskedApiKey,
+                    verificationState = apiKeyVerificationState,
+                    onVerifyAndActivate = {
+                        onVerifyAndActivateKey(it)
+                        showKeyManage = false
+                    },
+                    onRemoveKey = {
+                        onRemoveApiKey()
+                        showKeyManage = false
+                    }
+                )
+            }
+
+            if (isApiKeyConfigured && !showKeyManage) {
+                // Any-Language Selector Row + Custom Language Input
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    AiLanguageOption.entries.forEach { langOpt ->
+                        val selected = customLanguage.isBlank() && preferredLanguage == langOpt
+                        GlassPill(
+                            onClick = {
+                                customLangDraft = ""
+                                onSelectLanguage(langOpt)
+                            },
+                            isSelected = selected,
+                            contentPaddingHorizontal = 9.dp,
+                            contentPaddingVertical = 5.dp,
+                            modifier = Modifier.testTag("ai_drawer_lang_${langOpt.shortCode}")
+                        ) {
+                            Text(
+                                text = "${langOpt.label} (${langOpt.nativeName})",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = glass.primaryText
+                            )
+                        }
+                    }
                 }
 
-                GlassPill(
-                    onClick = { onSelectMode(mode) },
-                    isSelected = isSelected,
-                    elevation = if (isSelected) 6.dp else 0.dp,
-                    contentPaddingHorizontal = 10.dp,
-                    contentPaddingVertical = 9.dp,
-                    modifier = Modifier
-                        .weight(1f)
-                        .testTag("dock_mode_${mode.name}")
+                // Custom Any-Language Field
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        Icon(
-                            imageVector = icon,
-                            contentDescription = mode.label,
-                            tint = if (isSelected) glass.accent else glass.secondaryText,
-                            modifier = Modifier.size(18.dp)
-                        )
-                        Spacer(modifier = Modifier.height(2.dp))
-                        Text(
-                            text = mode.label,
-                            style = MaterialTheme.typography.labelSmall,
-                            color = if (isSelected) glass.primaryText else glass.secondaryText,
-                            maxLines = 1
+                    Icon(Icons.Default.Language, null, tint = glass.accent, modifier = Modifier.size(16.dp))
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(glass.accentSoft.copy(alpha = 0.45f))
+                            .padding(horizontal = 10.dp, vertical = 7.dp)
+                    ) {
+                        if (customLangDraft.isEmpty()) {
+                            Text(
+                                text = "Or type ANY language (e.g., Bangla, Urdu, Tamil, Turkish)…",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = glass.mutedText,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                        BasicTextField(
+                            value = customLangDraft,
+                            onValueChange = {
+                                customLangDraft = it
+                                onCustomLanguageChange(it)
+                            },
+                            textStyle = MaterialTheme.typography.bodySmall.copy(color = glass.primaryText),
+                            cursorBrush = SolidColor(glass.accent),
+                            singleLine = true,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("ai_drawer_custom_language_input")
                         )
                     }
+                }
+
+                // Quick Summary Prompts
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    GlassPill(
+                        onClick = {
+                            onSendQuery("Summarize Page $currentPage clearly with bullet points.")
+                        },
+                        contentPaddingHorizontal = 10.dp,
+                        contentPaddingVertical = 6.dp,
+                        modifier = Modifier.testTag("viewer_ai_quick_summarize_pill")
+                    ) {
+                        Text("Summarize Page $currentPage", style = MaterialTheme.typography.labelSmall, color = glass.accent)
+                    }
+                    GlassPill(
+                        onClick = {
+                            onSendQuery("Summarize the entire PDF document with key takeaways.")
+                        },
+                        contentPaddingHorizontal = 10.dp,
+                        contentPaddingVertical = 6.dp
+                    ) {
+                        Text("Summarize Full PDF", style = MaterialTheme.typography.labelSmall, color = glass.primaryText)
+                    }
+                    GlassPill(
+                        onClick = {
+                            onSendQuery("Explain the most important concepts and action items in simple words.")
+                        },
+                        contentPaddingHorizontal = 10.dp,
+                        contentPaddingVertical = 6.dp
+                    ) {
+                        Text("Explain Simply", style = MaterialTheme.typography.labelSmall, color = glass.primaryText)
+                    }
+                }
+
+                // Response Area
+                if (uiState !is AiAssistantUiState.Idle) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(18.dp))
+                            .background(glass.accentSoft.copy(alpha = 0.5f))
+                            .border(1.dp, glass.rimBorder, RoundedCornerShape(18.dp))
+                            .padding(12.dp)
+                            .testTag("viewer_ai_assistant_reply_card"),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        when (uiState) {
+                            is AiAssistantUiState.Streaming -> {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    CircularProgressIndicator(modifier = Modifier.size(15.dp), strokeWidth = 2.dp, color = glass.accent)
+                                    Text(
+                                        text = "Responding in $effectiveLanguageLabel…",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = glass.accent
+                                    )
+                                }
+                                Text(
+                                    text = uiState.partialText,
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = glass.primaryText
+                                )
+                            }
+
+                            is AiAssistantUiState.Success -> {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text(
+                                        text = uiState.contextBadge,
+                                        fontFamily = JetBrainsTabularFamily,
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = glass.accent
+                                    )
+                                    IconButton(
+                                        onClick = onDismissReply,
+                                        modifier = Modifier.size(24.dp)
+                                    ) {
+                                        Icon(Icons.Default.Close, "Clear reply", tint = glass.secondaryText, modifier = Modifier.size(15.dp))
+                                    }
+                                }
+                                Text(
+                                    text = uiState.answerText,
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = glass.primaryText,
+                                    modifier = Modifier.testTag("viewer_ai_assistant_answer_text")
+                                )
+                                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                    GlassPill(
+                                        onClick = { onCopyReply(uiState.answerText) },
+                                        contentPaddingHorizontal = 10.dp,
+                                        contentPaddingVertical = 6.dp
+                                    ) {
+                                        Icon(Icons.Default.ContentCopy, null, tint = glass.accent, modifier = Modifier.size(14.dp))
+                                        Spacer(Modifier.width(4.dp))
+                                        Text("Copy", style = MaterialTheme.typography.labelSmall, color = glass.primaryText)
+                                    }
+                                    GlassPill(
+                                        onClick = { onPinReplyAsSticky(uiState.answerText) },
+                                        contentPaddingHorizontal = 10.dp,
+                                        contentPaddingVertical = 6.dp
+                                    ) {
+                                        Icon(Icons.Default.PushPin, null, tint = glass.goldBadge, modifier = Modifier.size(14.dp))
+                                        Spacer(Modifier.width(4.dp))
+                                        Text("Pin Sticky", style = MaterialTheme.typography.labelSmall, color = glass.primaryText)
+                                    }
+                                }
+                            }
+
+                            is AiAssistantUiState.Error -> {
+                                Text(
+                                    text = uiState.message,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.error
+                                )
+                            }
+
+                            AiAssistantUiState.Idle -> {}
+                        }
+                    }
+                }
+
+                // Query Input Row
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(50))
+                        .background(glass.accentSoft.copy(alpha = 0.55f))
+                        .border(1.dp, glass.rimBorder, RoundedCornerShape(50))
+                        .padding(horizontal = 12.dp, vertical = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Text(
+                        text = effectiveLanguageBadge,
+                        fontFamily = JetBrainsTabularFamily,
+                        fontWeight = FontWeight.Bold,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = glass.accent
+                    )
+                    Box(modifier = Modifier.weight(1f)) {
+                        if (query.isEmpty()) {
+                            Text(
+                                text = "Ask about Page $currentPage ($effectiveLanguageLabel)…",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = glass.mutedText,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                        BasicTextField(
+                            value = query,
+                            onValueChange = onQueryChange,
+                            textStyle = MaterialTheme.typography.bodyMedium.copy(color = glass.primaryText),
+                            cursorBrush = SolidColor(glass.accent),
+                            singleLine = true,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("viewer_ai_assistant_input")
+                        )
+                    }
+                    GlassPill(
+                        onClick = {
+                            if (query.isNotBlank()) onSendQuery(null)
+                            else onSendQuery("Summarize Page $currentPage clearly.")
+                        },
+                        isSelected = true,
+                        contentPaddingHorizontal = 11.dp,
+                        contentPaddingVertical = 7.dp,
+                        modifier = Modifier.testTag("viewer_ai_assistant_send_button")
+                    ) {
+                        Icon(
+                            imageVector = Icons.AutoMirrored.Filled.Send,
+                            contentDescription = "Send AI query",
+                            tint = glass.primaryText,
+                            modifier = Modifier.size(16.dp)
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ViewDisplaySlideOutGlassDrawer(
+    currentPage: Int,
+    totalPages: Int,
+    zoomScale: Float,
+    paperTint: PdfCanvasPaperTint,
+    themeMode: GlassThemeMode,
+    scrollDirection: PageScrollDirection,
+    onZoomOut: () -> Unit,
+    onToggleSmartZoom: () -> Unit,
+    onZoomIn: () -> Unit,
+    onSelectPaperTint: (PdfCanvasPaperTint) -> Unit,
+    onSelectThemeMode: (GlassThemeMode) -> Unit,
+    onSelectScrollDirection: (PageScrollDirection) -> Unit,
+    onOpenReflow: () -> Unit,
+    onOpenNavigator: () -> Unit,
+    onOpenPageOrganizer: () -> Unit,
+    onClose: () -> Unit
+) {
+    val glass = LocalLiquidGlass.current
+
+    GlassSurface(
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag("viewer_display_slide_drawer"),
+        shape = RoundedCornerShape(26.dp),
+        elevation = 22.dp
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(14.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text("Display & Zoom", style = MaterialTheme.typography.titleMedium, color = glass.primaryText)
+                IconButton(onClick = onClose, modifier = Modifier.size(30.dp)) {
+                    Icon(Icons.Default.Close, "Close view drawer", tint = glass.secondaryText, modifier = Modifier.size(18.dp))
+                }
+            }
+
+            // Zoom Row + Reflow & Page Organizer
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    GlassPill(onClick = onZoomOut, contentPaddingHorizontal = 10.dp, contentPaddingVertical = 7.dp) {
+                        Icon(Icons.Default.ZoomOut, "Zoom out", tint = glass.primaryText, modifier = Modifier.size(16.dp))
+                    }
+                    GlassPill(
+                        onClick = onToggleSmartZoom,
+                        contentPaddingHorizontal = 10.dp,
+                        contentPaddingVertical = 7.dp,
+                        modifier = Modifier.testTag("viewer_zoom_badge_pill")
+                    ) {
+                        Text("${(zoomScale * 100).toInt()}%", fontFamily = JetBrainsTabularFamily, style = MaterialTheme.typography.labelSmall, color = glass.primaryText)
+                    }
+                    GlassPill(onClick = onZoomIn, contentPaddingHorizontal = 10.dp, contentPaddingVertical = 7.dp) {
+                        Icon(Icons.Default.ZoomIn, "Zoom in", tint = glass.primaryText, modifier = Modifier.size(16.dp))
+                    }
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    GlassPill(onClick = onOpenReflow, contentPaddingHorizontal = 10.dp, contentPaddingVertical = 7.dp) {
+                        Text("Reflow", style = MaterialTheme.typography.labelSmall, color = glass.primaryText)
+                    }
+                    GlassPill(onClick = onOpenPageOrganizer, contentPaddingHorizontal = 10.dp, contentPaddingVertical = 7.dp) {
+                        Text("Organize", style = MaterialTheme.typography.labelSmall, color = glass.accent)
+                    }
+                }
+            }
+
+            // Paper Tint (includes AMOLED Black)
+            Text("PDF Paper Filter", style = MaterialTheme.typography.labelLarge, color = glass.secondaryText)
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                PdfCanvasPaperTint.entries.forEach { tint ->
+                    GlassPill(
+                        onClick = { onSelectPaperTint(tint) },
+                        isSelected = paperTint == tint,
+                        contentPaddingHorizontal = 10.dp,
+                        contentPaddingVertical = 7.dp,
+                        modifier = Modifier.testTag("viewer_paper_tint_${tint.name}")
+                    ) {
+                        Text(tint.label, style = MaterialTheme.typography.labelSmall, color = glass.primaryText)
+                    }
+                }
+            }
+
+            // App Theme (Light / Dark / AMOLED / Auto)
+            Text("Display Theme", style = MaterialTheme.typography.labelLarge, color = glass.secondaryText)
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                GlassThemeMode.entries.forEach { mode ->
+                    GlassPill(
+                        onClick = { onSelectThemeMode(mode) },
+                        isSelected = themeMode == mode,
+                        contentPaddingHorizontal = 8.dp,
+                        contentPaddingVertical = 7.dp,
+                        modifier = Modifier
+                            .weight(1f)
+                            .testTag("viewer_theme_${mode.name}")
+                    ) {
+                        Text(mode.shortLabel, style = MaterialTheme.typography.labelSmall, color = glass.primaryText)
+                    }
+                }
+            }
+
+            // Scroll Direction + Page Jump
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                PageScrollDirection.entries.forEach { dir ->
+                    GlassPill(
+                        onClick = { onSelectScrollDirection(dir) },
+                        isSelected = scrollDirection == dir,
+                        contentPaddingHorizontal = 10.dp,
+                        contentPaddingVertical = 7.dp,
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Text(dir.label, style = MaterialTheme.typography.labelSmall, color = glass.primaryText)
+                    }
+                }
+                GlassPill(
+                    onClick = onOpenNavigator,
+                    contentPaddingHorizontal = 10.dp,
+                    contentPaddingVertical = 7.dp
+                ) {
+                    Text("P.$currentPage/$totalPages", fontFamily = JetBrainsTabularFamily, style = MaterialTheme.typography.labelSmall, color = glass.accent)
                 }
             }
         }

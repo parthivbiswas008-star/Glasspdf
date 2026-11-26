@@ -98,7 +98,7 @@ import com.example.model.TextMarkupAnnotation
 import com.example.model.ViewerDockMode
 import com.example.ui.components.GlassPill
 import com.example.ui.components.GlassSurface
-import com.example.ui.theme.EditorialHighlightSwatches
+import com.example.ui.theme.FluorescentHighlightSwatches
 import com.example.ui.theme.JetBrainsTabularFamily
 import com.example.ui.theme.LocalLiquidGlass
 import com.example.ui.theme.SignatureFontOptions
@@ -121,6 +121,7 @@ import kotlin.math.sin
 fun PdfPageLayer(
     pageIndex: Int,
     pageBitmap: Bitmap?,
+    pageAspectRatio: Float = 612f / 792f,
     snapshot: DocumentAnnotationsSnapshot,
     dockMode: ViewerDockMode,
     readModeStickyNoteActive: Boolean = false,
@@ -135,6 +136,8 @@ fun PdfPageLayer(
     onDoubleTapZoom: () -> Unit,
     onSelectWordOrLineAtTap: (NormalizedPoint, Boolean) -> Boolean = { _, _ -> false },
     onUpdateTouchSelection: (NormalizedPoint, NormalizedPoint) -> Unit,
+    onAdjustLeftHandle: (NormalizedPoint) -> Unit = {},
+    onAdjustRightHandle: (NormalizedPoint) -> Unit = {},
     onSelectionFingerLift: () -> Unit,
     onSelectExistingMarkup: (TextMarkupAnnotation?) -> Unit,
     onCommitInkStroke: (List<NormalizedPoint>) -> Unit,
@@ -194,19 +197,36 @@ fun PdfPageLayer(
                     )
                 )
             )
+            PdfCanvasPaperTint.AMOLED_DARK -> ColorFilter.colorMatrix(
+                ColorMatrix(
+                    floatArrayOf(
+                        -1.0f, 0f, 0f, 0f, 248f,
+                        0f, -1.0f, 0f, 0f, 250f,
+                        0f, 0f, -1.0f, 0f, 255f,
+                        0f, 0f, 0f, 1f, 0f
+                    )
+                )
+            )
         }
     }
 
+    val isDarkPaper = paperTint == PdfCanvasPaperTint.NIGHT_CONTRAST || paperTint == PdfCanvasPaperTint.AMOLED_DARK
+    val safeAspectRatio = pageAspectRatio.coerceIn(0.45f, 2.2f)
     val enableFullCanvasDragInterceptor = dockMode == ViewerDockMode.ANNOTATE || dockMode == ViewerDockMode.DRAW
     val enableReadHorizontalSelectDrag = dockMode == ViewerDockMode.READ && !readModeStickyNoteActive
 
     BoxWithConstraints(
         modifier = modifier
             .fillMaxWidth()
-            .aspectRatio(612f / 792f)
-            .shadow(12.dp, RoundedCornerShape(14.dp))
+            .aspectRatio(safeAspectRatio)
+            .shadow(if (isDarkPaper) 4.dp else 12.dp, RoundedCornerShape(14.dp))
             .clip(RoundedCornerShape(14.dp))
             .background(paperBgColor)
+            .then(
+                if (paperTint == PdfCanvasPaperTint.AMOLED_DARK) {
+                    Modifier.border(0.75.dp, Color(0xFF1F242C), RoundedCornerShape(14.dp))
+                } else Modifier
+            )
             .testTag("pdf_page_container_$pageIndex")
     ) {
         val pageWidthPx = constraints.maxWidth.toFloat().coerceAtLeast(1f)
@@ -414,9 +434,9 @@ fun PdfPageLayer(
                 )
             }
 
-            // 2. Saved Normalized Text Markup Annotations
+            // 2. Saved Normalized Text Markup Annotations (Realistic Fluorescent Neon Highlighter Glow)
             for (markup in pageMarkups) {
-                val baseColor = parseComposeHex(markup.colorHex, Color(0xFFE6C26E))
+                val baseColor = parseComposeHex(markup.colorHex, Color(0xFFFFF01F))
                 val isSelected = selectedExistingMarkup?.id == markup.id
 
                 for (r in markup.rects) {
@@ -429,12 +449,27 @@ fun PdfPageLayer(
 
                     when (markup.style) {
                         MarkupStyle.HIGHLIGHT -> {
+                            val pad = 1.8.dp.toPx()
+                            // Outer subtle fluorescent marker glow
                             drawRoundRect(
-                                color = baseColor.copy(alpha = markup.opacity.coerceIn(0.28f, 0.62f)),
+                                color = baseColor.copy(alpha = if (isDarkPaper) 0.24f else 0.19f),
+                                topLeft = Offset(left - pad, top - pad),
+                                size = Size(widthPx + pad * 2f, heightPx + pad * 2f),
+                                cornerRadius = CornerRadius(5.5.dp.toPx())
+                            )
+                            // Authentic fluorescent chisel-tip ink body
+                            drawRoundRect(
+                                color = baseColor.copy(
+                                    alpha = if (isDarkPaper) {
+                                        markup.opacity.coerceIn(0.32f, 0.56f)
+                                    } else {
+                                        markup.opacity.coerceIn(0.42f, 0.72f)
+                                    }
+                                ),
                                 topLeft = Offset(left, top),
                                 size = Size(widthPx, heightPx),
-                                cornerRadius = CornerRadius(4.dp.toPx()),
-                                blendMode = if (paperTint == PdfCanvasPaperTint.NIGHT_CONTRAST) BlendMode.SrcOver else BlendMode.Multiply
+                                cornerRadius = CornerRadius(3.5.dp.toPx()),
+                                blendMode = if (isDarkPaper) BlendMode.SrcOver else BlendMode.Multiply
                             )
                         }
                         MarkupStyle.UNDERLINE -> {
@@ -442,7 +477,7 @@ fun PdfPageLayer(
                                 color = baseColor,
                                 start = Offset(left, bottom - 1.dp.toPx()),
                                 end = Offset(right, bottom - 1.dp.toPx()),
-                                strokeWidth = 2.4.dp.toPx(),
+                                strokeWidth = 2.6.dp.toPx(),
                                 cap = StrokeCap.Round
                             )
                         }
@@ -452,7 +487,7 @@ fun PdfPageLayer(
                                 color = baseColor,
                                 start = Offset(left, midY),
                                 end = Offset(right, midY),
-                                strokeWidth = 2.2.dp.toPx(),
+                                strokeWidth = 2.4.dp.toPx(),
                                 cap = StrokeCap.Round
                             )
                         }
@@ -473,46 +508,59 @@ fun PdfPageLayer(
                             drawPath(
                                 path = wavePath,
                                 color = baseColor,
-                                style = Stroke(width = 2.dp.toPx(), cap = StrokeCap.Round)
+                                style = Stroke(width = 2.2.dp.toPx(), cap = StrokeCap.Round)
                             )
                         }
                     }
 
                     if (isSelected) {
                         drawRoundRect(
-                            color = Color(0xFF355266),
+                            color = if (isDarkPaper) Color(0xFF00F0FF) else Color(0xFF1D4ED8),
                             topLeft = Offset(left - 2.dp.toPx(), top - 2.dp.toPx()),
                             size = Size(widthPx + 4.dp.toPx(), heightPx + 4.dp.toPx()),
                             cornerRadius = CornerRadius(5.dp.toPx()),
-                            style = Stroke(width = 1.5.dp.toPx())
+                            style = Stroke(width = 1.6.dp.toPx())
                         )
                     }
                 }
             }
 
-            // 3. Active Live Touch Selection Preview + Teardrop Selection Handles
+            // 3. Active Live Touch Selection Preview (Fluorescent Glow + Pin Lines)
             if (touchSelection != null && touchSelection.mergedLineRects.isNotEmpty()) {
-                val selColor = parseComposeHex(activeColorHex, Color(0xFFE6C26E))
+                val selColor = parseComposeHex(activeColorHex, Color(0xFFFFF01F))
+                val pad = 1.6.dp.toPx()
                 for (r in touchSelection.mergedLineRects) {
                     drawRoundRect(
-                        color = selColor.copy(alpha = 0.42f),
+                        color = selColor.copy(alpha = 0.22f),
+                        topLeft = Offset(r.x * w - pad, r.y * h - pad),
+                        size = Size(r.width * w + pad * 2f, r.height * h + pad * 2f),
+                        cornerRadius = CornerRadius(5.dp.toPx())
+                    )
+                    drawRoundRect(
+                        color = selColor.copy(alpha = if (isDarkPaper) 0.42f else 0.54f),
                         topLeft = Offset(r.x * w, r.y * h),
                         size = Size(r.width * w, r.height * h),
-                        cornerRadius = CornerRadius(4.dp.toPx())
+                        cornerRadius = CornerRadius(3.5.dp.toPx()),
+                        blendMode = if (isDarkPaper) BlendMode.SrcOver else BlendMode.Multiply
                     )
                 }
                 val firstR = touchSelection.mergedLineRects.first()
                 val lastR = touchSelection.mergedLineRects.last()
-                val handleColor = Color(0xFF355266)
-                val startTop = Offset(firstR.x * w, firstR.y * h)
-                val startBottom = Offset(firstR.x * w, firstR.bottom * h)
-                drawLine(handleColor, startTop, startBottom, strokeWidth = 2.5.dp.toPx())
-                drawCircle(handleColor, radius = 6.dp.toPx(), center = startTop)
-
-                val endTop = Offset(lastR.right * w, lastR.y * h)
-                val endBottom = Offset(lastR.right * w, lastR.bottom * h)
-                drawLine(handleColor, endTop, endBottom, strokeWidth = 2.5.dp.toPx())
-                drawCircle(handleColor, radius = 6.dp.toPx(), center = endBottom)
+                val handleColor = if (isDarkPaper) Color(0xFF00F0FF) else Color(0xFF1D4ED8)
+                drawLine(
+                    color = handleColor,
+                    start = Offset(firstR.x * w, firstR.y * h),
+                    end = Offset(firstR.x * w, firstR.bottom * h),
+                    strokeWidth = 2.6.dp.toPx(),
+                    cap = StrokeCap.Round
+                )
+                drawLine(
+                    color = handleColor,
+                    start = Offset(lastR.right * w, lastR.y * h),
+                    end = Offset(lastR.right * w, lastR.bottom * h),
+                    strokeWidth = 2.6.dp.toPx(),
+                    cap = StrokeCap.Round
+                )
             }
 
             // 4. Saved Freehand Quadratic Bezier Ink Strokes
@@ -1029,6 +1077,137 @@ fun PdfPageLayer(
                 }
             }
         }
+
+        // LAYER 3C: True Independent Directional Draggable Left & Right Selection Handles
+        // Dragging Left handle moves ONLY the start/left edge (right edge strictly locked).
+        // Dragging Right handle moves ONLY the end/right edge (left edge strictly locked).
+        if (touchSelection != null && touchSelection.mergedLineRects.isNotEmpty()) {
+            val density = LocalDensity.current
+            val handleHitPx = with(density) { 48.dp.toPx() }
+            val halfHitPx = handleHitPx * 0.5f
+            val firstR = touchSelection.mergedLineRects.first()
+            val lastR = touchSelection.mergedLineRects.last()
+            val handleAccent = if (isDarkPaper) Color(0xFF00F0FF) else Color(0xFF1D4ED8)
+            val handleIconTint = if (isDarkPaper) Color(0xFF000000) else Color.White
+
+            // LEFT HANDLE (moves ONLY the left/start boundary)
+            var leftHandleDragging by remember(pageIndex) { mutableStateOf(false) }
+            var liveLeftNormX by remember(pageIndex) { mutableStateOf(firstR.x) }
+            var liveLeftNormY by remember(pageIndex) { mutableStateOf(firstR.y + firstR.height * 0.5f) }
+            if (!leftHandleDragging) {
+                liveLeftNormX = firstR.x
+                liveLeftNormY = firstR.y + firstR.height * 0.5f
+            }
+
+            val leftCenterPxX = (firstR.x * pageWidthPx).roundToInt()
+            val leftCenterPxY = (firstR.bottom * pageHeightPx).roundToInt()
+            Box(
+                modifier = Modifier
+                    .offset {
+                        IntOffset(
+                            x = (leftCenterPxX - halfHitPx).roundToInt(),
+                            y = (leftCenterPxY - halfHitPx * 0.35f).roundToInt()
+                        )
+                    }
+                    .size(48.dp)
+                    .pointerInput(pageIndex, pageWidthPx, pageHeightPx) {
+                        detectDragGestures(
+                            onDragStart = {
+                                leftHandleDragging = true
+                            },
+                            onDragEnd = {
+                                leftHandleDragging = false
+                            },
+                            onDragCancel = {
+                                leftHandleDragging = false
+                            },
+                            onDrag = { change, dragAmount ->
+                                change.consume()
+                                liveLeftNormX = (liveLeftNormX + dragAmount.x / pageWidthPx).coerceIn(0.01f, 0.99f)
+                                liveLeftNormY = (liveLeftNormY + dragAmount.y / pageHeightPx).coerceIn(0.01f, 0.99f)
+                                onAdjustLeftHandle(NormalizedPoint(liveLeftNormX, liveLeftNormY))
+                            }
+                        )
+                    }
+                    .testTag("selection_handle_left"),
+                contentAlignment = Alignment.Center
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(if (leftHandleDragging) 26.dp else 22.dp)
+                        .shadow(8.dp, RoundedCornerShape(topStart = 2.dp, topEnd = 12.dp, bottomStart = 12.dp, bottomEnd = 12.dp))
+                        .clip(RoundedCornerShape(topStart = 2.dp, topEnd = 12.dp, bottomStart = 12.dp, bottomEnd = 12.dp))
+                        .background(handleAccent)
+                        .border(2.dp, Color.White, RoundedCornerShape(topStart = 2.dp, topEnd = 12.dp, bottomStart = 12.dp, bottomEnd = 12.dp)),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = "◀",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = handleIconTint
+                    )
+                }
+            }
+
+            // RIGHT HANDLE (moves ONLY the right/end boundary)
+            var rightHandleDragging by remember(pageIndex) { mutableStateOf(false) }
+            var liveRightNormX by remember(pageIndex) { mutableStateOf(lastR.right) }
+            var liveRightNormY by remember(pageIndex) { mutableStateOf(lastR.y + lastR.height * 0.5f) }
+            if (!rightHandleDragging) {
+                liveRightNormX = lastR.right
+                liveRightNormY = lastR.y + lastR.height * 0.5f
+            }
+
+            val rightCenterPxX = (lastR.right * pageWidthPx).roundToInt()
+            val rightCenterPxY = (lastR.bottom * pageHeightPx).roundToInt()
+            Box(
+                modifier = Modifier
+                    .offset {
+                        IntOffset(
+                            x = (rightCenterPxX - halfHitPx).roundToInt(),
+                            y = (rightCenterPxY - halfHitPx * 0.35f).roundToInt()
+                        )
+                    }
+                    .size(48.dp)
+                    .pointerInput(pageIndex, pageWidthPx, pageHeightPx) {
+                        detectDragGestures(
+                            onDragStart = {
+                                rightHandleDragging = true
+                            },
+                            onDragEnd = {
+                                rightHandleDragging = false
+                            },
+                            onDragCancel = {
+                                rightHandleDragging = false
+                            },
+                            onDrag = { change, dragAmount ->
+                                change.consume()
+                                liveRightNormX = (liveRightNormX + dragAmount.x / pageWidthPx).coerceIn(0.01f, 0.99f)
+                                liveRightNormY = (liveRightNormY + dragAmount.y / pageHeightPx).coerceIn(0.01f, 0.99f)
+                                onAdjustRightHandle(NormalizedPoint(liveRightNormX, liveRightNormY))
+                            }
+                        )
+                    }
+                    .testTag("selection_handle_right"),
+                contentAlignment = Alignment.Center
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(if (rightHandleDragging) 26.dp else 22.dp)
+                        .shadow(8.dp, RoundedCornerShape(topStart = 12.dp, topEnd = 2.dp, bottomStart = 12.dp, bottomEnd = 12.dp))
+                        .clip(RoundedCornerShape(topStart = 12.dp, topEnd = 2.dp, bottomStart = 12.dp, bottomEnd = 12.dp))
+                        .background(handleAccent)
+                        .border(2.dp, Color.White, RoundedCornerShape(topStart = 12.dp, topEnd = 2.dp, bottomStart = 12.dp, bottomEnd = 12.dp)),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = "▶",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = handleIconTint
+                    )
+                }
+            }
+        }
     }
 }
 
@@ -1070,26 +1249,33 @@ fun TouchSelectionGlassPill(
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
-            // Row 1: 5 Non-Neon Editorial Color Swatches + Quick Expand Line/Paragraph
+            // Row 1: 6 Realistic Fluorescent Highlighter Swatches + Quick Expand Line/Paragraph
             Row(
-                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                modifier = Modifier.horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                EditorialHighlightSwatches.forEach { swatch ->
+                FluorescentHighlightSwatches.forEach { swatch ->
                     val currentHex = existingMarkup?.colorHex ?: activeColorHex
                     val isSelected = currentHex.equals(swatch.hex, ignoreCase = true)
                     Box(
                         modifier = Modifier
-                            .size(28.dp)
+                            .size(30.dp)
+                            .shadow(
+                                elevation = if (isSelected) 10.dp else 3.dp,
+                                shape = CircleShape,
+                                ambientColor = swatch.glowColor,
+                                spotColor = swatch.glowColor
+                            )
                             .clip(CircleShape)
                             .background(swatch.color)
                             .border(
-                                width = if (isSelected) 2.5.dp else 1.dp,
-                                color = if (isSelected) glass.primaryText else Color.White.copy(alpha = 0.6f),
+                                width = if (isSelected) 2.5.dp else 1.2.dp,
+                                color = if (isSelected) glass.primaryText else Color.White.copy(alpha = 0.85f),
                                 shape = CircleShape
                             )
                             .clickable { onSelectColorAndCommit(swatch.hex) }
-                            .testTag("swatch_${swatch.name.lowercase()}")
+                            .testTag("swatch_${swatch.name.lowercase().replace(" ", "_")}")
                     )
                 }
 

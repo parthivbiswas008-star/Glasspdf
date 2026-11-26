@@ -128,12 +128,7 @@ jobs:
             echo "::error::Verified APK missing before release asset preparation."
             exit 1
           fi
-          RAW_REPO_NAME="${GITHUB_REPOSITORY#*/}"
-          SANITIZED_REPO=$(echo "$RAW_REPO_NAME" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9]+/-/g; s/^-+//; s/-+$//')
-          if [ -z "$SANITIZED_REPO" ]; then
-            SANITIZED_REPO="android-app"
-          fi
-          ASSET_FILENAME="${SANITIZED_REPO}-debug-build-${GITHUB_RUN_NUMBER}.apk"
+          ASSET_FILENAME="Glass-PDF-Pro-build-${GITHUB_RUN_NUMBER}.apk"
           RELEASE_TMP_DIR=$(mktemp -d "${RUNNER_TEMP:-/tmp}/apk-release-XXXXXX")
           ASSET_FULL_PATH="${RELEASE_TMP_DIR}/${ASSET_FILENAME}"
           cp "$EXPECTED_APK" "$ASSET_FULL_PATH"
@@ -141,8 +136,8 @@ jobs:
             echo "::error::Failed to copy release APK asset to $ASSET_FULL_PATH"
             exit 1
           fi
-          RELEASE_TAG="debug-apk-build-${GITHUB_RUN_NUMBER}-${GITHUB_RUN_ATTEMPT}"
-          RELEASE_TITLE="Debug APK Build #${GITHUB_RUN_NUMBER}"
+          RELEASE_TAG="glass-pdf-pro-build-${GITHUB_RUN_NUMBER}-${GITHUB_RUN_ATTEMPT}"
+          RELEASE_TITLE="Glass PDF Pro — Build #${GITHUB_RUN_NUMBER}"
           {
             echo "asset_path=${ASSET_FULL_PATH}"
             echo "asset_name=${ASSET_FILENAME}"

@@ -210,9 +210,21 @@ object PdfProEngine {
 
                 when (markup.style) {
                     MarkupStyle.HIGHLIGHT -> {
+                        // Subtle outer fluorescent glow halo + crisp translucent highlighter ink
+                        val glowPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                            color = baseColor
+                            alpha = (markup.opacity.coerceIn(0.28f, 0.78f) * 72).toInt()
+                            style = Paint.Style.FILL
+                        }
+                        canvas.drawRoundRect(
+                            RectF(left - 1.5f, top - 1f, right + 1.5f, bottom + 1f),
+                            4f,
+                            4f,
+                            glowPaint
+                        )
                         val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
                             color = baseColor
-                            alpha = (markup.opacity.coerceIn(0.2f, 0.75f) * 255).toInt()
+                            alpha = (markup.opacity.coerceIn(0.32f, 0.78f) * 255).toInt()
                             style = Paint.Style.FILL
                             xfermode = PorterDuffXfermode(PorterDuff.Mode.MULTIPLY)
                         }
@@ -1036,8 +1048,8 @@ object PdfProEngine {
     ): List<PdfTextWord> {
         if (bitmap.isRecycled || bitmap.width < 32 || bitmap.height < 32) return emptyList()
         return try {
-            val sampleW = 180
-            val sampleH = 240
+            val sampleW = 260
+            val sampleH = 340
             val scaled = Bitmap.createScaledBitmap(bitmap, sampleW, sampleH, false)
             val pixels = IntArray(sampleW * sampleH)
             scaled.getPixels(pixels, 0, sampleW, 0, 0, sampleW, sampleH)
@@ -1045,7 +1057,7 @@ object PdfProEngine {
                 scaled.recycle()
             }
 
-            // Estimate paper background luminance from corners
+            // Estimate paper background luminance from all 4 corners + center edges
             fun luma(px: Int): Int {
                 val r = (px shr 16) and 0xFF
                 val g = (px shr 8) and 0xFF
@@ -1056,17 +1068,20 @@ object PdfProEngine {
             val bgLuma = (
                 luma(pixels[2 * sampleW + 2]) +
                     luma(pixels[2 * sampleW + (sampleW - 3)]) +
-                    luma(pixels[(sampleH - 3) * sampleW + 2])
-                ) / 3
+                    luma(pixels[(sampleH - 3) * sampleW + 2]) +
+                    luma(pixels[(sampleH - 3) * sampleW + (sampleW - 3)])
+                ) / 4
 
+            // Adaptive contrast threshold handles light scans, tinted papers, and thin Bengali/Latin glyphs
+            val inkThreshold = 26
             val isInk: (Int) -> Boolean = { px ->
-                kotlin.math.abs(luma(px) - bgLuma) > 38
+                kotlin.math.abs(luma(px) - bgLuma) > inkThreshold
             }
 
-            val marginXStart = (sampleW * 0.06f).toInt()
-            val marginXEnd = (sampleW * 0.94f).toInt()
-            val marginYStart = (sampleH * 0.04f).toInt()
-            val marginYEnd = (sampleH * 0.95f).toInt()
+            val marginXStart = (sampleW * 0.04f).toInt()
+            val marginXEnd = (sampleW * 0.96f).toInt()
+            val marginYStart = (sampleH * 0.03f).toInt()
+            val marginYEnd = (sampleH * 0.97f).toInt()
 
             // 1. Horizontal ink projection to find text rows
             val rowHasInk = BooleanArray(sampleH)
@@ -1076,7 +1091,7 @@ object PdfProEngine {
                 for (x in marginXStart until marginXEnd) {
                     if (isInk(pixels[rowOffset + x])) inkCount++
                 }
-                rowHasInk[y] = inkCount >= 3
+                rowHasInk[y] = inkCount >= 2
             }
 
             val lineBands = mutableListOf<IntRange>()
@@ -1088,14 +1103,14 @@ object PdfProEngine {
                     val endY = y - 1
                     val bandH = endY - startY + 1
                     // Split overly tall bands (e.g., diagrams or tight paragraphs) into readable line strips
-                    if (bandH in 2..10) {
+                    if (bandH in 2..14) {
                         lineBands.add(startY..endY)
-                    } else if (bandH > 10) {
+                    } else if (bandH > 14) {
                         var subY = startY
                         while (subY <= endY) {
-                            val subEnd = (subY + 5).coerceAtMost(endY)
+                            val subEnd = (subY + 7).coerceAtMost(endY)
                             lineBands.add(subY..subEnd)
-                            subY += 7
+                            subY += 9
                         }
                     }
                 } else {
@@ -1106,7 +1121,7 @@ object PdfProEngine {
             val detectedWords = mutableListOf<PdfTextWord>()
             var lineIdx = 0
 
-            // 2. For each detected horizontal line band, segment into word boxes
+            // 2. For each detected horizontal line band, segment into granular word boxes
             for (band in lineBands) {
                 val colHasInk = BooleanArray(sampleW)
                 for (x in marginXStart until marginXEnd) {
@@ -1126,9 +1141,9 @@ object PdfProEngine {
 
                 var x = marginXStart
                 var wordNumInLine = 1
-                val normY = (band.first.toFloat() / sampleH.toFloat() - 0.004f).coerceIn(0.02f, 0.95f)
-                val normH = ((band.last - band.first + 1).toFloat() / sampleH.toFloat() + 0.008f)
-                    .coerceIn(0.016f, 0.036f)
+                val normY = (band.first.toFloat() / sampleH.toFloat() - 0.003f).coerceIn(0.015f, 0.96f)
+                val normH = ((band.last - band.first + 1).toFloat() / sampleH.toFloat() + 0.007f)
+                    .coerceIn(0.015f, 0.036f)
 
                 while (x < marginXEnd) {
                     if (colHasInk[x]) {
@@ -1137,14 +1152,13 @@ object PdfProEngine {
                         val endX = x - 1
                         val spanPx = endX - startX + 1
                         if (spanPx >= 3) {
-                            // If a continuous span is very wide, split into word-sized chunks for granular selection
-                            val maxChunkPx = 26
+                            val maxChunkPx = 30
                             var chunkStart = startX
                             while (chunkStart <= endX) {
                                 val chunkEnd = (chunkStart + maxChunkPx).coerceAtMost(endX)
-                                val normX = (chunkStart.toFloat() / sampleW.toFloat()).coerceIn(0.04f, 0.92f)
+                                val normX = (chunkStart.toFloat() / sampleW.toFloat()).coerceIn(0.025f, 0.95f)
                                 val normW = ((chunkEnd - chunkStart + 1).toFloat() / sampleW.toFloat())
-                                    .coerceIn(0.025f, 0.88f)
+                                    .coerceIn(0.022f, 0.92f)
                                 detectedWords.add(
                                     PdfTextWord(
                                         text = "P${pageIndex + 1}•L${lineIdx + 1}•W$wordNumInLine",

@@ -52,6 +52,81 @@ class ExampleUnitTest {
         assertEquals(1, tapSelection!!.mergedLineRects.size)
         assertTrue(ProToolWorkflow.entries.contains(ProToolWorkflow.FILL_AND_SIGN))
     }
+
+    @Test
+    fun textMarkupEngine_rightHandleDragMovesOnlyRightEdgeAndLocksLeftEdge() {
+        val initial = TextMarkupEngine.computeTouchSelection(
+            pageWords = emptyList(),
+            startPoint = NormalizedPoint(0.20f, 0.30f),
+            endPoint = NormalizedPoint(0.50f, 0.30f)
+        )!!
+        val pinnedLeftX = initial.mergedLineRects.first().x
+
+        // Drag right handle further right -> right moves to ~0.82, left remains strictly locked
+        val expandedRight = TextMarkupEngine.adjustRightHandle(
+            pageWords = emptyList(),
+            current = initial,
+            newRightPoint = NormalizedPoint(0.82f, 0.30f)
+        )
+        assertEquals(pinnedLeftX, expandedRight.mergedLineRects.first().x, 0.0001f)
+        assertEquals(0.82f, expandedRight.mergedLineRects.last().right, 0.0001f)
+
+        // Drag right handle back left -> right shrinks to ~0.35, left STILL strictly locked
+        val shrunkRight = TextMarkupEngine.adjustRightHandle(
+            pageWords = emptyList(),
+            current = expandedRight,
+            newRightPoint = NormalizedPoint(0.35f, 0.30f)
+        )
+        assertEquals(pinnedLeftX, shrunkRight.mergedLineRects.first().x, 0.0001f)
+        assertEquals(0.35f, shrunkRight.mergedLineRects.last().right, 0.0001f)
+    }
+
+    @Test
+    fun textMarkupEngine_leftHandleDragMovesOnlyLeftEdgeAndLocksRightEdge() {
+        val initial = TextMarkupEngine.computeTouchSelection(
+            pageWords = emptyList(),
+            startPoint = NormalizedPoint(0.30f, 0.40f),
+            endPoint = NormalizedPoint(0.70f, 0.40f)
+        )!!
+        val pinnedRightX = initial.mergedLineRects.last().right
+
+        // Drag left handle further left -> left moves to ~0.12, right remains strictly locked
+        val expandedLeft = TextMarkupEngine.adjustLeftHandle(
+            pageWords = emptyList(),
+            current = initial,
+            newLeftPoint = NormalizedPoint(0.12f, 0.40f)
+        )
+        assertEquals(0.12f, expandedLeft.mergedLineRects.first().x, 0.0001f)
+        assertEquals(pinnedRightX, expandedLeft.mergedLineRects.last().right, 0.0001f)
+
+        // Drag left handle inward right -> left moves to ~0.48, right STILL strictly locked
+        val shrunkLeft = TextMarkupEngine.adjustLeftHandle(
+            pageWords = emptyList(),
+            current = expandedLeft,
+            newLeftPoint = NormalizedPoint(0.48f, 0.40f)
+        )
+        assertEquals(0.48f, shrunkLeft.mergedLineRects.first().x, 0.0001f)
+        assertEquals(pinnedRightX, shrunkLeft.mergedLineRects.last().right, 0.0001f)
+    }
+
+    @Test
+    fun textMarkupEngine_importedBitmapWordsAllowExactContinuousDrag() {
+        val bitmapWords = listOf(
+            PdfTextWord("P1•L1", NormalizedRect(0.08f, 0.24f, 0.25f, 0.022f), lineIndex = 0),
+            PdfTextWord("P1•L1", NormalizedRect(0.36f, 0.24f, 0.30f, 0.022f), lineIndex = 0),
+            PdfTextWord("P1•L1", NormalizedRect(0.70f, 0.24f, 0.20f, 0.022f), lineIndex = 0)
+        )
+        val selection = TextMarkupEngine.computeTouchSelection(
+            pageWords = bitmapWords,
+            startPoint = NormalizedPoint(0.18f, 0.25f),
+            endPoint = NormalizedPoint(0.64f, 0.25f)
+        )
+        assertNotNull(selection)
+        assertEquals(1, selection!!.mergedLineRects.size)
+        assertEquals(0.18f, selection.mergedLineRects.first().x, 0.001f)
+        assertEquals(0.64f, selection.mergedLineRects.first().right, 0.001f)
+    }
 }
+
 
 

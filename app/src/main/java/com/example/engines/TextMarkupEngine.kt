@@ -8,15 +8,21 @@ import kotlin.math.max
 import kotlin.math.min
 
 /**
- * Selected Text Highlighting & Touch Markup Engine (`TextMarkupEngine`).
+ * Selected Text Highlighting & Precision Directional Handle Engine (`TextMarkupEngine`).
  * Implements:
- * 1. Touch-handle & swipe selection in normalized [0.0, 1.0] page coordinates.
- * 2. Smart line-merging of fragmented word rects on the same visual line
- *    (vertical overlap > 60% or |centerY_A - centerY_B| < minHeight * 0.5).
- * 3. Single-tap word/line selection & 1-tap expand to Full Line or Paragraph.
- * 4. Floating Liquid Glass Action Pill coordinate anchor calculation with top-edge auto-flip.
+ * 1. Continuous + word-aware touch selection in normalized [0.0, 1.0] page coordinates.
+ * 2. True independent Left & Right directional handle adjustment:
+ *    - `adjustRightHandle(...)` mutates ONLY the right/end edge while keeping the left/start edge 100% locked.
+ *    - `adjustLeftHandle(...)` mutates ONLY the left/start edge while keeping the right/end edge 100% locked.
+ * 3. Instant reliable selection on imported PDFs (handles both real PDF text layers and bitmap-detected lines).
+ * 4. Smart line-merging & floating action pill anchor calculation with top-edge auto-flip.
  */
 object TextMarkupEngine {
+
+    private const val MIN_SPAN_WIDTH = 0.022f
+    private const val DEFAULT_LINE_HEIGHT = 0.024f
+    private const val PAGE_MIN_X = 0.02f
+    private const val PAGE_MAX_X = 0.98f
 
     data class SelectionResult(
         val selectedWords: List<PdfTextWord>,
@@ -28,20 +34,42 @@ object TextMarkupEngine {
         val endAnchor: NormalizedPoint = NormalizedPoint(0.5f, 0.1f)
     )
 
+    private data class VisualLineBand(
+        val lineIndex: Int,
+        val y: Float,
+        val height: Float,
+        val leftX: Float,
+        val rightX: Float,
+        val words: List<PdfTextWord>
+    ) {
+        val bottom: Float get() = y + height
+        val centerY: Float get() = y + height * 0.5f
+    }
+
     /**
      * Given a drag start and current/end point in normalized [0..1] page space,
-     * extracts all words in reading order between the start and end anchors (or intersecting box),
-     * merges fragmented word boxes per visual line, and computes the floating pill anchor.
-     * For imported/scanned PDFs where no words are indexed at the drag region, synthesizes clean
-     * normalized line highlight rects along the drag trajectory so highlighting always works.
+     * produces a crisp, smooth highlight selection that works reliably on both indexed PDFs
+     * and freshly imported PDFs.
      */
     fun computeTouchSelection(
         pageWords: List<PdfTextWord>,
         startPoint: NormalizedPoint,
         endPoint: NormalizedPoint
     ): SelectionResult? {
-        if (pageWords.isEmpty()) {
-            return buildFallbackSelectionForDrag(startPoint, endPoint)
+        val lines = extractVisualLines(pageWords)
+        val hasSyntheticBitmapWords = pageWords.isNotEmpty() && pageWords.any {
+            it.text.contains("•L") || it.text.startsWith("Page")
+        }
+
+        // For imported/scanned PDFs (empty or bitmap-detected chunks), use exact continuous horizontal drag
+        // aligned cleanly to the nearest detected text line band so highlighting follows the finger 1:1.
+        if (pageWords.isEmpty() || hasSyntheticBitmapWords) {
+            return buildContinuousDirectionalSelection(
+                lines = lines,
+                pageWords = pageWords,
+                anchorA = startPoint,
+                anchorB = endPoint
+            )
         }
 
         val minX = min(startPoint.x, endPoint.x)
@@ -49,7 +77,6 @@ object TextMarkupEngine {
         val minY = min(startPoint.y, endPoint.y)
         val maxY = max(startPoint.y, endPoint.y)
 
-        // Sort words top-to-bottom (by lineIndex / y), then left-to-right (by x)
         val orderedWords = pageWords.sortedWith(
             compareBy<PdfTextWord> { it.lineIndex }
                 .thenBy { (it.bounds.y * 100f).toInt() }
@@ -74,13 +101,103 @@ object TextMarkupEngine {
         }
 
         return buildSelectionResultFromWords(selectedWords)
-            ?: buildFallbackSelectionForDrag(startPoint, endPoint)
+            ?: buildContinuousDirectionalSelection(lines, pageWords, startPoint, endPoint)
+    }
+
+    /**
+     * Adjusts ONLY the RIGHT (end) boundary of an active selection.
+     * The LEFT (start) boundary (`current.mergedLineRects.first().x`, `y`, `height`) is strictly pinned
+     * and will NEVER shift when dragging the right handle rightward, leftward, or across lines.
+     */
+    fun adjustRightHandle(
+        pageWords: List<PdfTextWord>,
+        current: SelectionResult,
+        newRightPoint: NormalizedPoint
+    ): SelectionResult {
+        if (current.mergedLineRects.isEmpty()) return current
+        val firstRect = current.mergedLineRects.first()
+        val pinnedLeftX = firstRect.x.coerceIn(PAGE_MIN_X, PAGE_MAX_X - MIN_SPAN_WIDTH)
+        val pinnedTopY = firstRect.y
+        val pinnedHeight = firstRect.height.coerceIn(0.014f, 0.055f)
+        val pinnedBottomY = pinnedTopY + pinnedHeight
+
+        val lines = extractVisualLines(pageWords)
+        val lineTolerance = pinnedHeight * 0.55f
+
+        val newRects: List<NormalizedRect> = if (newRightPoint.y <= pinnedBottomY + lineTolerance) {
+            // Single-line adjustment: strictly hold pinnedLeftX, move ONLY right edge!
+            val targetRight = newRightPoint.x.coerceIn(pinnedLeftX + MIN_SPAN_WIDTH, PAGE_MAX_X)
+            listOf(
+                NormalizedRect(
+                    x = pinnedLeftX,
+                    y = pinnedTopY,
+                    width = (targetRight - pinnedLeftX).coerceAtLeast(MIN_SPAN_WIDTH),
+                    height = pinnedHeight
+                )
+            )
+        } else {
+            // Multi-line expansion downward: first line keeps pinnedLeftX strictly fixed,
+            // intermediate lines fill across, final line ends exactly at newRightPoint.x
+            buildMultiLineRectsPinnedStart(
+                lines = lines,
+                pinnedLeftX = pinnedLeftX,
+                pinnedTopY = pinnedTopY,
+                pinnedHeight = pinnedHeight,
+                targetRightPoint = newRightPoint
+            )
+        }
+
+        return buildSelectionResultFromRects(newRects, pageWords, fallbackLabel = current.selectedText)
+    }
+
+    /**
+     * Adjusts ONLY the LEFT (start) boundary of an active selection.
+     * The RIGHT (end) boundary (`current.mergedLineRects.last().right`, `y`, `height`) is strictly pinned
+     * and will NEVER shift when dragging the left handle leftward, rightward, or across lines.
+     */
+    fun adjustLeftHandle(
+        pageWords: List<PdfTextWord>,
+        current: SelectionResult,
+        newLeftPoint: NormalizedPoint
+    ): SelectionResult {
+        if (current.mergedLineRects.isEmpty()) return current
+        val lastRect = current.mergedLineRects.last()
+        val pinnedRightX = lastRect.right.coerceIn(PAGE_MIN_X + MIN_SPAN_WIDTH, PAGE_MAX_X)
+        val pinnedLastTopY = lastRect.y
+        val pinnedLastHeight = lastRect.height.coerceIn(0.014f, 0.055f)
+
+        val lines = extractVisualLines(pageWords)
+        val lineTolerance = pinnedLastHeight * 0.55f
+
+        val newRects: List<NormalizedRect> = if (newLeftPoint.y >= pinnedLastTopY - lineTolerance) {
+            // Single-line adjustment: strictly hold pinnedRightX, move ONLY left edge!
+            val targetLeft = newLeftPoint.x.coerceIn(PAGE_MIN_X, pinnedRightX - MIN_SPAN_WIDTH)
+            listOf(
+                NormalizedRect(
+                    x = targetLeft,
+                    y = pinnedLastTopY,
+                    width = (pinnedRightX - targetLeft).coerceAtLeast(MIN_SPAN_WIDTH),
+                    height = pinnedLastHeight
+                )
+            )
+        } else {
+            // Multi-line expansion upward: final line keeps pinnedRightX strictly fixed,
+            // first line starts exactly at newLeftPoint.x
+            buildMultiLineRectsPinnedEnd(
+                lines = lines,
+                pinnedRightX = pinnedRightX,
+                pinnedLastTopY = pinnedLastTopY,
+                pinnedLastHeight = pinnedLastHeight,
+                targetLeftPoint = newLeftPoint
+            )
+        }
+
+        return buildSelectionResultFromRects(newRects, pageWords, fallbackLabel = current.selectedText)
     }
 
     /**
      * Selects the tapped word (or full line if `selectFullLine == true`) when the user taps
-     * or long-presses on text. If `pageWords` is empty (e.g., newly imported PDF before OCR),
-     * synthesizes a clean selectable word/line span at the tap coordinate.
+     * or long-presses on text. Guarantees reliable selection on imported PDFs as well.
      */
     fun selectWordOrLineAtPoint(
         pageWords: List<PdfTextWord>,
@@ -95,9 +212,9 @@ object TextMarkupEngine {
                 .thenBy { (it.bounds.y * 100f).toInt() }
                 .thenBy { it.bounds.x }
         )
-        val hitIdx = findClosestWordIndex(orderedWords, tapPoint, maxVerticalDelta = 0.048f)
+        val hitIdx = findClosestWordIndex(orderedWords, tapPoint, maxVerticalDelta = 0.052f)
         if (hitIdx == -1) {
-            return if (selectFullLine) buildFallbackSelectionForTap(tapPoint, true) else null
+            return buildFallbackSelectionForTap(tapPoint, selectFullLine)
         }
 
         val hitWord = orderedWords[hitIdx]
@@ -107,78 +224,225 @@ object TextMarkupEngine {
             listOf(hitWord)
         }
         return buildSelectionResultFromWords(words)
+            ?: buildFallbackSelectionForTap(tapPoint, selectFullLine)
     }
 
-    private fun buildFallbackSelectionForDrag(
-        startPoint: NormalizedPoint,
-        endPoint: NormalizedPoint
+    private fun buildContinuousDirectionalSelection(
+        lines: List<VisualLineBand>,
+        pageWords: List<PdfTextWord>,
+        anchorA: NormalizedPoint,
+        anchorB: NormalizedPoint
     ): SelectionResult {
-        val minX = min(startPoint.x, endPoint.x).coerceIn(0.06f, 0.90f)
-        val maxX = max(startPoint.x, endPoint.x).coerceIn((minX + 0.06f).coerceAtMost(0.94f), 0.94f)
-        val minY = min(startPoint.y, endPoint.y).coerceIn(0.05f, 0.93f)
-        val maxY = max(startPoint.y, endPoint.y).coerceIn(minY, 0.95f)
-        val lineH = 0.024f
-        val verticalSpan = maxY - minY
+        val startLine = findNearestVisualLine(lines, anchorA.y)
+        val endLine = findNearestVisualLine(lines, anchorB.y)
 
-        val syntheticWords = mutableListOf<PdfTextWord>()
-        val baseLineIdx = (minY * 36f).toInt().coerceAtLeast(0)
-
-        if (verticalSpan <= lineH * 1.4f) {
-            val rect = NormalizedRect(
-                x = minX,
-                y = (minY - lineH * 0.45f).coerceIn(0.03f, 0.94f),
-                width = (maxX - minX).coerceIn(0.06f, 0.88f),
-                height = lineH
-            )
-            syntheticWords.add(
-                PdfTextWord(
-                    text = "Highlighted passage (Line ${baseLineIdx + 1})",
-                    bounds = rect,
-                    lineIndex = baseLineIdx
-                )
-            )
+        val isSingleLine = if (startLine != null && endLine != null) {
+            startLine.lineIndex == endLine.lineIndex
         } else {
-            val numLines = ((verticalSpan / (lineH * 1.25f)).toInt() + 1).coerceIn(2, 12)
-            val stepY = verticalSpan / (numLines - 1).coerceAtLeast(1)
-            for (i in 0 until numLines) {
-                val ly = (minY + i * stepY - lineH * 0.4f).coerceIn(0.03f, 0.94f)
-                val lx = if (i == 0) minX else 0.09f
-                val rx = if (i == numLines - 1) maxX else 0.91f
-                val w = (rx - lx).coerceIn(0.08f, 0.84f)
-                syntheticWords.add(
-                    PdfTextWord(
-                        text = "Line ${baseLineIdx + i + 1}",
-                        bounds = NormalizedRect(lx, ly, w, lineH),
-                        lineIndex = baseLineIdx + i
+            abs(anchorA.y - anchorB.y) <= DEFAULT_LINE_HEIGHT * 1.25f
+        }
+
+        val rects = if (isSingleLine) {
+            val leftX = min(anchorA.x, anchorB.x).coerceIn(PAGE_MIN_X, PAGE_MAX_X - MIN_SPAN_WIDTH)
+            val rightX = max(anchorA.x, anchorB.x).coerceIn(leftX + MIN_SPAN_WIDTH, PAGE_MAX_X)
+            val bandY = startLine?.y ?: (anchorA.y - DEFAULT_LINE_HEIGHT * 0.5f).coerceIn(0.02f, 0.95f)
+            val bandH = startLine?.height ?: DEFAULT_LINE_HEIGHT
+            listOf(NormalizedRect(leftX, bandY, rightX - leftX, bandH))
+        } else {
+            val topPt = if (anchorA.y <= anchorB.y) anchorA else anchorB
+            val botPt = if (anchorA.y <= anchorB.y) anchorB else anchorA
+            val topBand = findNearestVisualLine(lines, topPt.y)
+            val topY = topBand?.y ?: (topPt.y - DEFAULT_LINE_HEIGHT * 0.5f).coerceIn(0.02f, 0.94f)
+            val topH = topBand?.height ?: DEFAULT_LINE_HEIGHT
+            buildMultiLineRectsPinnedStart(
+                lines = lines,
+                pinnedLeftX = topPt.x.coerceIn(PAGE_MIN_X, PAGE_MAX_X - MIN_SPAN_WIDTH),
+                pinnedTopY = topY,
+                pinnedHeight = topH,
+                targetRightPoint = botPt
+            )
+        }
+
+        return buildSelectionResultFromRects(rects, pageWords, fallbackLabel = "Highlighted passage")
+    }
+
+    private fun buildMultiLineRectsPinnedStart(
+        lines: List<VisualLineBand>,
+        pinnedLeftX: Float,
+        pinnedTopY: Float,
+        pinnedHeight: Float,
+        targetRightPoint: NormalizedPoint
+    ): List<NormalizedRect> {
+        val endBand = findNearestVisualLine(lines, targetRightPoint.y)
+        val endTopY = endBand?.y ?: (targetRightPoint.y - pinnedHeight * 0.5f)
+            .coerceIn(pinnedTopY + pinnedHeight * 1.1f, 0.95f)
+        val endHeight = endBand?.height ?: pinnedHeight
+
+        val intermediateBands = lines.filter { band ->
+            band.centerY > pinnedTopY + pinnedHeight && band.centerY < endTopY
+        }
+
+        val defaultRightMargin = (lines.maxOfOrNull { it.rightX } ?: 0.92f).coerceIn(0.75f, 0.96f)
+        val defaultLeftMargin = (lines.minOfOrNull { it.leftX } ?: 0.08f).coerceIn(0.04f, 0.20f)
+
+        val result = mutableListOf<NormalizedRect>()
+
+        // 1. First line — pinnedLeftX is strictly preserved!
+        val firstLineRight = (findNearestVisualLine(lines, pinnedTopY + pinnedHeight * 0.5f)?.rightX
+            ?: defaultRightMargin).coerceAtLeast(pinnedLeftX + MIN_SPAN_WIDTH)
+        result.add(
+            NormalizedRect(
+                x = pinnedLeftX,
+                y = pinnedTopY,
+                width = (firstLineRight - pinnedLeftX).coerceAtLeast(MIN_SPAN_WIDTH),
+                height = pinnedHeight
+            )
+        )
+
+        // 2. Intermediate lines
+        if (intermediateBands.isNotEmpty()) {
+            intermediateBands.forEach { band ->
+                result.add(
+                    NormalizedRect(
+                        x = band.leftX,
+                        y = band.y,
+                        width = (band.rightX - band.leftX).coerceAtLeast(MIN_SPAN_WIDTH),
+                        height = band.height
                     )
                 )
             }
+        } else {
+            val step = (pinnedHeight * 1.28f).coerceAtLeast(0.024f)
+            var cursorY = pinnedTopY + step
+            var guard = 0
+            while (cursorY + pinnedHeight * 0.6f < endTopY && guard < 24) {
+                result.add(
+                    NormalizedRect(
+                        x = defaultLeftMargin,
+                        y = cursorY,
+                        width = (defaultRightMargin - defaultLeftMargin).coerceAtLeast(0.10f),
+                        height = pinnedHeight
+                    )
+                )
+                cursorY += step
+                guard++
+            }
         }
-        return buildSelectionResultFromWords(syntheticWords)!!
+
+        // 3. Final line — ends cleanly at targetRightPoint.x
+        val lastLineLeft = (endBand?.leftX ?: defaultLeftMargin).coerceAtMost(PAGE_MAX_X - MIN_SPAN_WIDTH)
+        val clampedEndRight = targetRightPoint.x.coerceIn(lastLineLeft + MIN_SPAN_WIDTH, PAGE_MAX_X)
+        result.add(
+            NormalizedRect(
+                x = lastLineLeft,
+                y = endTopY,
+                width = (clampedEndRight - lastLineLeft).coerceAtLeast(MIN_SPAN_WIDTH),
+                height = endHeight
+            )
+        )
+
+        return result
+    }
+
+    private fun buildMultiLineRectsPinnedEnd(
+        lines: List<VisualLineBand>,
+        pinnedRightX: Float,
+        pinnedLastTopY: Float,
+        pinnedLastHeight: Float,
+        targetLeftPoint: NormalizedPoint
+    ): List<NormalizedRect> {
+        val startBand = findNearestVisualLine(lines, targetLeftPoint.y)
+        val startTopY = startBand?.y ?: (targetLeftPoint.y - pinnedLastHeight * 0.5f)
+            .coerceIn(0.02f, (pinnedLastTopY - pinnedLastHeight * 1.1f).coerceAtLeast(0.02f))
+        val startHeight = startBand?.height ?: pinnedLastHeight
+
+        val intermediateBands = lines.filter { band ->
+            band.centerY > startTopY + startHeight && band.centerY < pinnedLastTopY
+        }
+
+        val defaultRightMargin = (lines.maxOfOrNull { it.rightX } ?: 0.92f).coerceIn(0.75f, 0.96f)
+        val defaultLeftMargin = (lines.minOfOrNull { it.leftX } ?: 0.08f).coerceIn(0.04f, 0.20f)
+
+        val result = mutableListOf<NormalizedRect>()
+
+        // 1. First line — starts cleanly at targetLeftPoint.x
+        val firstLineRight = (startBand?.rightX ?: defaultRightMargin).coerceAtLeast(PAGE_MIN_X + MIN_SPAN_WIDTH)
+        val clampedStartLeft = targetLeftPoint.x.coerceIn(PAGE_MIN_X, firstLineRight - MIN_SPAN_WIDTH)
+        result.add(
+            NormalizedRect(
+                x = clampedStartLeft,
+                y = startTopY,
+                width = (firstLineRight - clampedStartLeft).coerceAtLeast(MIN_SPAN_WIDTH),
+                height = startHeight
+            )
+        )
+
+        // 2. Intermediate lines
+        if (intermediateBands.isNotEmpty()) {
+            intermediateBands.forEach { band ->
+                result.add(
+                    NormalizedRect(
+                        x = band.leftX,
+                        y = band.y,
+                        width = (band.rightX - band.leftX).coerceAtLeast(MIN_SPAN_WIDTH),
+                        height = band.height
+                    )
+                )
+            }
+        } else {
+            val step = (pinnedLastHeight * 1.28f).coerceAtLeast(0.024f)
+            var cursorY = startTopY + step
+            var guard = 0
+            while (cursorY + pinnedLastHeight * 0.6f < pinnedLastTopY && guard < 24) {
+                result.add(
+                    NormalizedRect(
+                        x = defaultLeftMargin,
+                        y = cursorY,
+                        width = (defaultRightMargin - defaultLeftMargin).coerceAtLeast(0.10f),
+                        height = pinnedLastHeight
+                    )
+                )
+                cursorY += step
+                guard++
+            }
+        }
+
+        // 3. Final line — pinnedRightX is strictly preserved!
+        val lastBandLeft = (findNearestVisualLine(lines, pinnedLastTopY + pinnedLastHeight * 0.5f)?.leftX
+            ?: defaultLeftMargin).coerceAtMost(pinnedRightX - MIN_SPAN_WIDTH)
+        result.add(
+            NormalizedRect(
+                x = lastBandLeft,
+                y = pinnedLastTopY,
+                width = (pinnedRightX - lastBandLeft).coerceAtLeast(MIN_SPAN_WIDTH),
+                height = pinnedLastHeight
+            )
+        )
+
+        return result
     }
 
     private fun buildFallbackSelectionForTap(
         tapPoint: NormalizedPoint,
         selectFullLine: Boolean
     ): SelectionResult? {
-        // Ignore taps in extreme margins so tapping blank edges still toggles chromeless reading
-        if (tapPoint.x < 0.07f || tapPoint.x > 0.93f || tapPoint.y < 0.06f || tapPoint.y > 0.93f) {
+        if (tapPoint.x < 0.05f || tapPoint.x > 0.95f || tapPoint.y < 0.04f || tapPoint.y > 0.95f) {
             return null
         }
-        val lineH = 0.024f
+        val lineH = DEFAULT_LINE_HEIGHT
         val lineIdx = (tapPoint.y * 36f).toInt().coerceAtLeast(0)
         val rect = if (selectFullLine) {
             NormalizedRect(
-                x = 0.09f,
-                y = (tapPoint.y - lineH * 0.5f).coerceIn(0.04f, 0.94f),
-                width = 0.82f,
+                x = 0.08f,
+                y = (tapPoint.y - lineH * 0.5f).coerceIn(0.03f, 0.94f),
+                width = 0.84f,
                 height = lineH
             )
         } else {
-            val wordW = 0.16f
+            val wordW = 0.22f
             NormalizedRect(
-                x = (tapPoint.x - wordW * 0.5f).coerceIn(0.08f, 0.78f),
-                y = (tapPoint.y - lineH * 0.5f).coerceIn(0.04f, 0.94f),
+                x = (tapPoint.x - wordW * 0.5f).coerceIn(0.06f, 0.74f),
+                y = (tapPoint.y - lineH * 0.5f).coerceIn(0.03f, 0.94f),
                 width = wordW,
                 height = lineH
             )
@@ -197,8 +461,14 @@ object TextMarkupEngine {
     fun expandSelectionToFullLines(
         pageWords: List<PdfTextWord>,
         current: SelectionResult
-    ): SelectionResult? {
-        if (pageWords.isEmpty() || current.selectedWords.isEmpty()) return current
+    ): SelectionResult {
+        if (current.mergedLineRects.isEmpty()) return current
+        if (pageWords.isEmpty()) {
+            val expanded = current.mergedLineRects.map { r ->
+                r.copy(x = 0.07f, width = 0.86f)
+            }
+            return buildSelectionResultFromRects(expanded, pageWords, current.selectedText)
+        }
         val lineIndices = current.selectedWords.map { it.lineIndex }.toSet()
         val expanded = pageWords
             .filter { it.lineIndex in lineIndices }
@@ -212,7 +482,7 @@ object TextMarkupEngine {
     fun expandSelectionToParagraph(
         pageWords: List<PdfTextWord>,
         current: SelectionResult
-    ): SelectionResult? {
+    ): SelectionResult {
         if (pageWords.isEmpty() || current.selectedWords.isEmpty()) return current
         val minLine = (current.selectedWords.minOf { it.lineIndex } - 2).coerceAtLeast(0)
         val maxLine = current.selectedWords.maxOf { it.lineIndex } + 2
@@ -220,6 +490,85 @@ object TextMarkupEngine {
             .filter { it.lineIndex in minLine..maxLine }
             .sortedWith(compareBy<PdfTextWord> { it.lineIndex }.thenBy { it.bounds.x })
         return buildSelectionResultFromWords(expanded) ?: current
+    }
+
+    private fun extractVisualLines(pageWords: List<PdfTextWord>): List<VisualLineBand> {
+        if (pageWords.isEmpty()) return emptyList()
+        val grouped = pageWords.groupBy { it.lineIndex }.toSortedMap()
+        return grouped.mapNotNull { (lineIdx, words) ->
+            val valid = words.filter { it.bounds.width > 0.002f && it.bounds.height > 0.002f }
+            if (valid.isEmpty()) return@mapNotNull null
+            val top = valid.minOf { it.bounds.y }
+            val bottom = valid.maxOf { it.bounds.bottom }
+            val left = valid.minOf { it.bounds.x }
+            val right = valid.maxOf { it.bounds.right }
+            VisualLineBand(
+                lineIndex = lineIdx,
+                y = top,
+                height = (bottom - top).coerceIn(0.015f, 0.05f),
+                leftX = left,
+                rightX = right,
+                words = valid.sortedBy { it.bounds.x }
+            )
+        }.sortedBy { it.y }
+    }
+
+    private fun findNearestVisualLine(lines: List<VisualLineBand>, y: Float): VisualLineBand? {
+        if (lines.isEmpty()) return null
+        val best = lines.minByOrNull { abs(it.centerY - y) } ?: return null
+        return if (abs(best.centerY - y) <= 0.042f) best else null
+    }
+
+    private fun buildSelectionResultFromRects(
+        rects: List<NormalizedRect>,
+        pageWords: List<PdfTextWord>,
+        fallbackLabel: String
+    ): SelectionResult {
+        val safeRects = rects.ifEmpty {
+            listOf(NormalizedRect(0.1f, 0.2f, 0.4f, DEFAULT_LINE_HEIGHT))
+        }
+        val intersectingWords = pageWords
+            .filter { w -> safeRects.any { r -> r.intersects(w.bounds) } }
+            .sortedWith(compareBy<PdfTextWord> { it.lineIndex }.thenBy { it.bounds.x })
+
+        val realText = intersectingWords
+            .filterNot { it.text.contains("•L") || it.text.startsWith("Page") }
+            .let { if (it.isNotEmpty()) buildSelectedString(it) else "" }
+
+        val topRect = safeRects.minByOrNull { it.y } ?: safeRects.first()
+        val bottomRect = safeRects.maxByOrNull { it.bottom } ?: safeRects.last()
+        val firstRect = safeRects.first()
+        val lastRect = safeRects.last()
+
+        val flipBelow = topRect.y < 0.14f
+        val anchorX = ((topRect.centerX + bottomRect.centerX) * 0.5f).coerceIn(0.18f, 0.82f)
+        val anchorY = if (flipBelow) {
+            (bottomRect.bottom + 0.025f).coerceAtMost(0.92f)
+        } else {
+            (topRect.y - 0.025f).coerceAtLeast(0.04f)
+        }
+
+        val syntheticWords = if (intersectingWords.isNotEmpty()) {
+            intersectingWords
+        } else {
+            safeRects.mapIndexed { idx, r ->
+                PdfTextWord(
+                    text = if (idx == 0) fallbackLabel.ifBlank { "Highlighted passage" } else "Line ${idx + 1}",
+                    bounds = r,
+                    lineIndex = (r.y * 36f).toInt().coerceAtLeast(0)
+                )
+            }
+        }
+
+        return SelectionResult(
+            selectedWords = syntheticWords,
+            mergedLineRects = safeRects,
+            selectedText = realText.ifBlank { fallbackLabel.ifBlank { "Highlighted passage" } },
+            pillAnchor = NormalizedPoint(anchorX, anchorY),
+            flipPillBelow = flipBelow,
+            startAnchor = NormalizedPoint(firstRect.x, firstRect.centerY),
+            endAnchor = NormalizedPoint(lastRect.right, lastRect.centerY)
+        )
     }
 
     private fun buildSelectionResultFromWords(selectedWords: List<PdfTextWord>): SelectionResult? {
@@ -259,10 +608,7 @@ object TextMarkupEngine {
 
     /**
      * Smart Line-Merging & Normalization Pipeline:
-     * 1. Sort extracted rects top-to-bottom (top), then left-to-right (left).
-     * 2. Merge fragmented glyph/word rects belonging to the same visual line
-     *    (vertical overlap > 60% or |centerY_A - centerY_B| < minHeight * 0.5)
-     *    into unified line boxes.
+     * Merges fragmented glyph/word rects belonging to the same visual line into unified line boxes.
      */
     fun mergeFragmentedWordRects(rawRects: List<NormalizedRect>): List<NormalizedRect> {
         val filtered = rawRects.filter { it.width > 0.001f && it.height > 0.001f }

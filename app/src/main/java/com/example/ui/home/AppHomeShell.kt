@@ -106,6 +106,7 @@ import com.example.model.RenderQualityMode
 import com.example.ui.components.GlassIconBadge
 import com.example.ui.components.GlassPill
 import com.example.ui.components.GlassSurface
+import com.example.ui.sheets.GeminiApiKeyActivationCard
 import com.example.ui.theme.GlassThemeMode
 import com.example.ui.theme.JetBrainsTabularFamily
 import com.example.ui.theme.LocalLiquidGlass
@@ -119,6 +120,7 @@ import com.example.ui.theme.ToolGradientPdfToZip
 import com.example.ui.theme.ToolGradientRedact
 import com.example.ui.theme.ToolGradientSplit
 import com.example.ui.theme.ToolGradientWatermark
+import com.example.viewmodel.ApiKeyVerificationState
 import com.example.viewmodel.PdfWorkspaceViewModel
 import java.io.File
 
@@ -138,6 +140,10 @@ fun AppHomeShell(
     val themeMode by viewModel.themeMode.collectAsStateWithLifecycle()
     val reflowTheme by viewModel.reflowTheme.collectAsStateWithLifecycle()
     val savedSignatures by viewModel.savedSignatures.collectAsStateWithLifecycle()
+    val isGeminiApiKeyConfigured by viewModel.isGeminiApiKeyConfigured.collectAsStateWithLifecycle()
+    val maskedGeminiApiKey by viewModel.maskedGeminiApiKey.collectAsStateWithLifecycle()
+    val apiKeyVerificationState by viewModel.apiKeyVerificationState.collectAsStateWithLifecycle()
+    val activeRefreshRateHz by viewModel.activeRefreshRateHz.collectAsStateWithLifecycle()
     val context = LocalContext.current
 
     Box(
@@ -207,11 +213,19 @@ fun AppHomeShell(
                     HomeTab.SETTINGS -> SettingsVaultTab(
                         appSettings = appSettings,
                         themeMode = themeMode,
+                        isGeminiApiKeyConfigured = isGeminiApiKeyConfigured,
+                        maskedGeminiApiKey = maskedGeminiApiKey,
+                        apiKeyVerificationState = apiKeyVerificationState,
+                        activeRefreshRateHz = activeRefreshRateHz,
+                        onVerifyAndActivateGeminiKey = { viewModel.saveAndVerifyGeminiApiKey(it) },
+                        onClearGeminiKey = { viewModel.clearGeminiApiKey() },
+                        onToggleForce144Hz = { viewModel.setForce144HzPerformanceMode(it) },
                         onSelectThemeMode = { viewModel.setThemeMode(it) },
                         onSelectScrollDirection = { viewModel.setPageScrollDirection(it) },
                         onSelectPaperTint = { viewModel.setPdfCanvasPaperTint(it) },
                         onSelectRenderQuality = { viewModel.setRenderQualityMode(it) },
                         onSelectPreferredAiLanguage = { viewModel.setPreferredAiLanguage(it) },
+                        onCustomAiLanguageChange = { viewModel.setCustomAiLanguage(it) },
                         onToggleInstantHighlight = { viewModel.setInstantHighlightOnDrag(it) },
                         onToggleAutoCopy = { viewModel.setAutoCopyHighlightedText(it) },
                         onToggleKeepScreenAwake = { viewModel.setKeepScreenAwake(it) },
@@ -1048,11 +1062,19 @@ private fun ProWorkflowGlassCard(
 private fun SettingsVaultTab(
     appSettings: AppSettings,
     themeMode: GlassThemeMode,
+    isGeminiApiKeyConfigured: Boolean,
+    maskedGeminiApiKey: String,
+    apiKeyVerificationState: ApiKeyVerificationState,
+    activeRefreshRateHz: Float,
+    onVerifyAndActivateGeminiKey: (String) -> Unit,
+    onClearGeminiKey: () -> Unit,
+    onToggleForce144Hz: (Boolean) -> Unit,
     onSelectThemeMode: (GlassThemeMode) -> Unit,
     onSelectScrollDirection: (PageScrollDirection) -> Unit,
     onSelectPaperTint: (PdfCanvasPaperTint) -> Unit,
     onSelectRenderQuality: (RenderQualityMode) -> Unit,
     onSelectPreferredAiLanguage: (AiLanguageOption) -> Unit = {},
+    onCustomAiLanguageChange: (String) -> Unit = {},
     onToggleInstantHighlight: (Boolean) -> Unit,
     onToggleAutoCopy: (Boolean) -> Unit,
     onToggleKeepScreenAwake: (Boolean) -> Unit,
@@ -1078,7 +1100,24 @@ private fun SettingsVaultTab(
         contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 6.dp, bottom = 140.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
-        // 1. Optical Glass Theme Switcher (Persisted)
+        // 0. Single Google Gemini API Key Vault (Unlocks AI Assistant, Vision OCR & AI Image Generator)
+        item {
+            GlassSurface(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(26.dp)
+            ) {
+                GeminiApiKeyActivationCard(
+                    isConfigured = isGeminiApiKeyConfigured,
+                    maskedKey = maskedGeminiApiKey,
+                    verificationState = apiKeyVerificationState,
+                    onVerifyAndActivate = onVerifyAndActivateGeminiKey,
+                    onRemoveKey = onClearGeminiKey,
+                    modifier = Modifier.padding(4.dp)
+                )
+            }
+        }
+
+        // 1. Optical Glass & AMOLED True Black Display Switcher (Persisted)
         item {
             GlassSurface(
                 modifier = Modifier.fillMaxWidth(),
@@ -1097,12 +1136,12 @@ private fun SettingsVaultTab(
                         Icon(Icons.Default.Palette, null, tint = glass.accent)
                         Column {
                             Text(
-                                text = "Optical Liquid Glass Material",
+                                text = "Display Theme & AMOLED Black",
                                 style = MaterialTheme.typography.titleMedium,
                                 color = glass.primaryText
                             )
                             Text(
-                                text = "Saved automatically across restarts",
+                                text = "Choose Light, Dark, pure #000000 AMOLED, or Auto",
                                 style = MaterialTheme.typography.bodyMedium,
                                 color = glass.secondaryText
                             )
@@ -1111,20 +1150,23 @@ private fun SettingsVaultTab(
 
                     Row(
                         modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
                         GlassThemeMode.entries.forEach { mode ->
                             GlassPill(
                                 onClick = { onSelectThemeMode(mode) },
                                 isSelected = themeMode == mode,
+                                contentPaddingHorizontal = 8.dp,
+                                contentPaddingVertical = 9.dp,
                                 modifier = Modifier
                                     .weight(1f)
                                     .testTag("theme_mode_${mode.name}")
                             ) {
                                 Text(
-                                    text = mode.label.split(" ").first(),
+                                    text = mode.shortLabel,
                                     style = MaterialTheme.typography.labelLarge,
-                                    color = glass.primaryText
+                                    color = glass.primaryText,
+                                    maxLines = 1
                                 )
                             }
                         }
@@ -1133,8 +1175,11 @@ private fun SettingsVaultTab(
             }
         }
 
-        // 1B. Preferred AI Assistant Language (Persisted & Synced with Viewer AI Bar)
+        // 1B. Preferred AI Assistant Language + Any Custom Language
         item {
+            var customLangInput by remember(appSettings.customAiLanguage) {
+                mutableStateOf(appSettings.customAiLanguage)
+            }
             GlassSurface(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -1159,7 +1204,7 @@ private fun SettingsVaultTab(
                                 color = glass.primaryText
                             )
                             Text(
-                                text = "Document AI responses & summaries will default to ${appSettings.preferredAiLanguage.label} (${appSettings.preferredAiLanguage.nativeName})",
+                                text = "Summaries & answers default to ${appSettings.effectiveAiLanguageLabel}",
                                 style = MaterialTheme.typography.bodyMedium,
                                 color = glass.secondaryText
                             )
@@ -1174,8 +1219,11 @@ private fun SettingsVaultTab(
                     ) {
                         AiLanguageOption.entries.forEach { lang ->
                             GlassPill(
-                                onClick = { onSelectPreferredAiLanguage(lang) },
-                                isSelected = appSettings.preferredAiLanguage == lang,
+                                onClick = {
+                                    customLangInput = ""
+                                    onSelectPreferredAiLanguage(lang)
+                                },
+                                isSelected = appSettings.customAiLanguage.isBlank() && appSettings.preferredAiLanguage == lang,
                                 modifier = Modifier.testTag("setting_ai_lang_${lang.name}")
                             ) {
                                 Text(
@@ -1186,11 +1234,24 @@ private fun SettingsVaultTab(
                             }
                         }
                     }
+
+                    OutlinedTextField(
+                        value = customLangInput,
+                        onValueChange = {
+                            customLangInput = it
+                            onCustomAiLanguageChange(it)
+                        },
+                        label = { Text("Or type any custom language (e.g., Bangla, Urdu, Tamil)") },
+                        singleLine = true,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("setting_custom_ai_language_input")
+                    )
                 }
             }
         }
 
-        // 2. Page Scroll Direction & PDF Paper Tint (Persisted)
+        // 2. Page Scroll Direction & PDF Paper Tint (Persisted, includes AMOLED Black)
         item {
             GlassSurface(
                 modifier = Modifier.fillMaxWidth(),
@@ -1259,7 +1320,7 @@ private fun SettingsVaultTab(
             }
         }
 
-        // 3. Render Engine Quality & Performance (Persisted)
+        // 3. Force 144Hz Performance Mode & Render Engine (Persisted)
         item {
             GlassSurface(
                 modifier = Modifier.fillMaxWidth(),
@@ -1272,23 +1333,52 @@ private fun SettingsVaultTab(
                     verticalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
                     Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Icon(Icons.Default.Speed, null, tint = glass.accent)
-                        Column {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Icon(Icons.Default.Speed, null, tint = glass.accent)
+                            Column {
+                                Text(
+                                    text = "Force 144Hz & Render Engine",
+                                    style = MaterialTheme.typography.titleMedium,
+                                    color = glass.primaryText
+                                )
+                                Text(
+                                    text = "Viewport-windowed renderer + max display refresh rate",
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = glass.secondaryText
+                                )
+                            }
+                        }
+                        Box(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(50))
+                                .background(glass.accentSoft)
+                                .padding(horizontal = 9.dp, vertical = 4.dp)
+                        ) {
                             Text(
-                                text = "PDF Render Engine & Frame Pacing",
-                                style = MaterialTheme.typography.titleMedium,
-                                color = glass.primaryText
-                            )
-                            Text(
-                                text = "LRU bitmap cache + zero-recomposition scroll engine",
-                                style = MaterialTheme.typography.bodyMedium,
-                                color = glass.secondaryText
+                                text = "${activeRefreshRateHz.toInt()} Hz",
+                                fontFamily = JetBrainsTabularFamily,
+                                fontWeight = FontWeight.Bold,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = glass.accent
                             )
                         }
                     }
+
+                    SettingToggleRow(
+                        title = "Force 144Hz Performance Mode",
+                        subtitle = "Requests highest supported display refresh rate (up to 144Hz) for ultra-fluid scrolling",
+                        checked = appSettings.force144HzPerformanceMode,
+                        onCheckedChange = onToggleForce144Hz,
+                        tag = "toggle_force_144hz_setting"
+                    )
 
                     Row(
                         modifier = Modifier.fillMaxWidth(),

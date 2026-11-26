@@ -3,8 +3,8 @@ package com.example.ui.theme
 import androidx.compose.ui.graphics.Color
 
 // ============================================================================
-// NON-NEON ARCHITECTURAL LIQUID GLASS PALETTE
-// Confirmed Theme: Frosted Alabaster (Light) & Warm Obsidian Slate (Dark)
+// ARCHITECTURAL LIQUID GLASS + AMOLED TRUE BLACK PALETTE
+// Themes: Frosted Alabaster (Light), Warm Obsidian Slate (Dark), AMOLED Black (#000000)
 // ============================================================================
 
 // Light Glass (Frosted Alabaster & Warm Travertine)
@@ -39,22 +39,43 @@ val FrostedSteelAccent = Color(0xFF8AA8BD)
 val FrostedSteelSoft = Color(0xFF25333E)
 val WarmAmberAccent = Color(0xFFD4A86A)
 
-// Editorial Non-Neon Highlight Swatches (Warm Amber, Botanical Sage, Dusty Cerulean, Terracotta Rose, Warm Apricot)
+// AMOLED True Black Glass (Pure #000000 OLED Display with Hairline Specular Rims)
+val AmoledBackdropTop = Color(0xFF000000)
+val AmoledBackdropBottom = Color(0xFF000000)
+val AmoledSurfaceTop = Color(0xEB0A0B0E)         // ~92% ultra-deep pitch surface
+val AmoledSurfaceBottom = Color(0xE0040507)      // ~88% near-black glass
+val AmoledPillTop = Color(0xF0111318)
+val AmoledPillBottom = Color(0xE608090C)
+val AmoledRimBorder = Color(0x2EFFFFFF)          // Crisp subtle hairline border
+val AmoledInnerSpecular = Color(0x3BFFFFFF)
+val AmoledPrimaryInk = Color(0xFFF7F8FA)
+val AmoledSecondaryInk = Color(0xFF9BA3AE)
+val AmoledMutedInk = Color(0xFF636B76)
+val AmoledCyanAccent = Color(0xFF6CC4FF)
+val AmoledCyanSoft = Color(0xFF10202E)
+val AmoledGoldBadge = Color(0xFFFFD166)
+
+// Authentic Fluorescent Neon Highlighter Swatches (Real Marker Luminosity & Glow)
 data class EditorialSwatch(
     val name: String,
     val hex: String,
-    val color: Color
+    val color: Color,
+    val glowColor: Color = color
 )
 
-val EditorialHighlightSwatches = listOf(
-    EditorialSwatch("Amber", "#E6C26E", Color(0xFFE6C26E)),
-    EditorialSwatch("Sage", "#84B59F", Color(0xFF84B59F)),
-    EditorialSwatch("Cerulean", "#7BAFD4", Color(0xFF7BAFD4)),
-    EditorialSwatch("Terracotta", "#D98A82", Color(0xFFD98A82)),
-    EditorialSwatch("Apricot", "#E5A97C", Color(0xFFE5A97C))
+val FluorescentHighlightSwatches = listOf(
+    EditorialSwatch("Yellow", "#FFF01F", Color(0xFFFFF01F), Color(0xFFFFEA00)),
+    EditorialSwatch("Lime", "#39FF14", Color(0xFF39FF14), Color(0xFF52FF33)),
+    EditorialSwatch("Pink", "#FF2E93", Color(0xFFFF2E93), Color(0xFFFF4DA6)),
+    EditorialSwatch("Cyan", "#00F0FF", Color(0xFF00F0FF), Color(0xFF33F5FF)),
+    EditorialSwatch("Orange", "#FF7A00", Color(0xFFFF7A00), Color(0xFFFF9529)),
+    EditorialSwatch("Violet", "#C44DFF", Color(0xFFC44DFF), Color(0xFFD475FF))
 )
 
-// Tool Card Muted Architectural Gradient Pairs (Zero Neon)
+// Backwards-compatible alias referencing the upgraded Fluorescent Highlighter palette
+val EditorialHighlightSwatches: List<EditorialSwatch> = FluorescentHighlightSwatches
+
+// Tool Card Architectural Gradient Pairs
 val ToolGradientMerge = listOf(Color(0xFF3D5A6C), Color(0xFF283D4B))
 val ToolGradientSplit = listOf(Color(0xFF6B5B4D), Color(0xFF4B3F35))
 val ToolGradientAiStudio = listOf(Color(0xFF8C6B3F), Color(0xFF594224))

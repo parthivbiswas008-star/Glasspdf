@@ -10,15 +10,17 @@ import androidx.compose.runtime.Immutable
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.graphics.Color
 
-enum class GlassThemeMode(val label: String) {
-    LIGHT_ALABASTER("Frosted Alabaster"),
-    DARK_OBSIDIAN("Obsidian Slate"),
-    AUTO_SYSTEM("System Auto")
+enum class GlassThemeMode(val label: String, val shortLabel: String) {
+    LIGHT_ALABASTER("Frosted Alabaster", "Light"),
+    DARK_OBSIDIAN("Obsidian Slate", "Dark"),
+    AMOLED_BLACK("AMOLED True Black", "AMOLED"),
+    AUTO_SYSTEM("System Auto", "Auto")
 }
 
 @Immutable
 data class LiquidGlassPalette(
     val isDark: Boolean,
+    val isAmoled: Boolean = false,
     val backdropTop: Color,
     val backdropBottom: Color,
     val glassSurfaceTop: Color,
@@ -37,6 +39,7 @@ data class LiquidGlassPalette(
 
 val LightAlabasterGlassPalette = LiquidGlassPalette(
     isDark = false,
+    isAmoled = false,
     backdropTop = AlabasterBackdropTop,
     backdropBottom = AlabasterBackdropBottom,
     glassSurfaceTop = AlabasterSurfaceTop,
@@ -55,6 +58,7 @@ val LightAlabasterGlassPalette = LiquidGlassPalette(
 
 val DarkObsidianGlassPalette = LiquidGlassPalette(
     isDark = true,
+    isAmoled = false,
     backdropTop = ObsidianBackdropTop,
     backdropBottom = ObsidianBackdropBottom,
     glassSurfaceTop = ObsidianSurfaceTop,
@@ -69,6 +73,25 @@ val DarkObsidianGlassPalette = LiquidGlassPalette(
     accent = FrostedSteelAccent,
     accentSoft = FrostedSteelSoft,
     goldBadge = WarmAmberAccent
+)
+
+val AmoledBlackGlassPalette = LiquidGlassPalette(
+    isDark = true,
+    isAmoled = true,
+    backdropTop = AmoledBackdropTop,
+    backdropBottom = AmoledBackdropBottom,
+    glassSurfaceTop = AmoledSurfaceTop,
+    glassSurfaceBottom = AmoledSurfaceBottom,
+    glassPillTop = AmoledPillTop,
+    glassPillBottom = AmoledPillBottom,
+    rimBorder = AmoledRimBorder,
+    innerSpecular = AmoledInnerSpecular,
+    primaryText = AmoledPrimaryInk,
+    secondaryText = AmoledSecondaryInk,
+    mutedText = AmoledMutedInk,
+    accent = AmoledCyanAccent,
+    accentSoft = AmoledCyanSoft,
+    goldBadge = AmoledGoldBadge
 )
 
 val LocalLiquidGlass = staticCompositionLocalOf { LightAlabasterGlassPalette }
@@ -105,20 +128,39 @@ private val DarkM3Scheme = darkColorScheme(
     error = Color(0xFFE07A74)
 )
 
+private val AmoledM3Scheme = darkColorScheme(
+    primary = AmoledCyanAccent,
+    onPrimary = Color(0xFF001420),
+    primaryContainer = AmoledCyanSoft,
+    onPrimaryContainer = AmoledPrimaryInk,
+    secondary = AmoledGoldBadge,
+    onSecondary = Color(0xFF1A1200),
+    background = Color(0xFF000000),
+    onBackground = AmoledPrimaryInk,
+    surface = Color(0xFF060709),
+    onSurface = AmoledPrimaryInk,
+    surfaceVariant = Color(0xFF111318),
+    onSurfaceVariant = AmoledSecondaryInk,
+    error = Color(0xFFFF6B6B)
+)
+
 @Composable
 fun GlassPdfTheme(
     themeMode: GlassThemeMode = GlassThemeMode.LIGHT_ALABASTER,
     content: @Composable () -> Unit
 ) {
     val systemDark = isSystemInDarkTheme()
-    val useDark = when (themeMode) {
-        GlassThemeMode.LIGHT_ALABASTER -> false
-        GlassThemeMode.DARK_OBSIDIAN -> true
-        GlassThemeMode.AUTO_SYSTEM -> systemDark
+    val glassPalette = when (themeMode) {
+        GlassThemeMode.LIGHT_ALABASTER -> LightAlabasterGlassPalette
+        GlassThemeMode.DARK_OBSIDIAN -> DarkObsidianGlassPalette
+        GlassThemeMode.AMOLED_BLACK -> AmoledBlackGlassPalette
+        GlassThemeMode.AUTO_SYSTEM -> if (systemDark) AmoledBlackGlassPalette else LightAlabasterGlassPalette
     }
-
-    val glassPalette = if (useDark) DarkObsidianGlassPalette else LightAlabasterGlassPalette
-    val colorScheme = if (useDark) DarkM3Scheme else LightM3Scheme
+    val colorScheme = when {
+        glassPalette.isAmoled -> AmoledM3Scheme
+        glassPalette.isDark -> DarkM3Scheme
+        else -> LightM3Scheme
+    }
 
     CompositionLocalProvider(LocalLiquidGlass provides glassPalette) {
         MaterialTheme(
@@ -135,7 +177,7 @@ fun MyApplicationTheme(
     content: @Composable () -> Unit
 ) {
     GlassPdfTheme(
-        themeMode = if (darkTheme) GlassThemeMode.DARK_OBSIDIAN else GlassThemeMode.LIGHT_ALABASTER,
+        themeMode = if (darkTheme) GlassThemeMode.AMOLED_BLACK else GlassThemeMode.LIGHT_ALABASTER,
         content = content
     )
 }

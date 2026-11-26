@@ -66,6 +66,15 @@ import java.security.MessageDigest
 
 private const val SETTINGS_PREFS_NAME = "glass_pdf_settings_prefs"
 private const val SETTINGS_JSON_KEY = "app_settings_json"
+private const val GEMINI_KEY_PREFS_NAME = "glass_pdf_ai_key_vault"
+private const val GEMINI_API_KEY_PREF = "user_gemini_api_key"
+
+sealed interface ApiKeyVerificationState {
+    data object Idle : ApiKeyVerificationState
+    data object Verifying : ApiKeyVerificationState
+    data class Verified(val message: String) : ApiKeyVerificationState
+    data class Error(val message: String) : ApiKeyVerificationState
+}
 
 sealed interface AiGenUiState {
     data object Idle : AiGenUiState
@@ -103,6 +112,7 @@ class PdfWorkspaceViewModel(application: Application) : AndroidViewModel(applica
 
     private val repository: GlassPdfRepository
     private val settingsPrefs = application.getSharedPreferences(SETTINGS_PREFS_NAME, Context.MODE_PRIVATE)
+    private val geminiKeyPrefs = application.getSharedPreferences(GEMINI_KEY_PREFS_NAME, Context.MODE_PRIVATE)
 
     val documents: StateFlow<List<PdfDocumentEntity>>
     val savedSignatures: StateFlow<List<SavedSignatureEntity>>
@@ -180,9 +190,27 @@ class PdfWorkspaceViewModel(application: Application) : AndroidViewModel(applica
     private val _isChromeless = MutableStateFlow(false)
     val isChromeless: StateFlow<Boolean> = _isChromeless.asStateFlow()
 
-    private val bitmapMemCache = object : LruCache<String, Bitmap>(24) {}
+    private val bitmapMemCache = object : LruCache<String, Bitmap>(28) {}
     private val _pageBitmaps = MutableStateFlow<Map<Int, Bitmap>>(emptyMap())
     val pageBitmaps: StateFlow<Map<Int, Bitmap>> = _pageBitmaps.asStateFlow()
+
+    private val _pageAspectRatios = MutableStateFlow<Map<Int, Float>>(emptyMap())
+    val pageAspectRatios: StateFlow<Map<Int, Float>> = _pageAspectRatios.asStateFlow()
+    private var renderWindowJob: Job? = null
+
+    // Hardware Refresh Rate Telemetry (Force 144Hz Mode)
+    private val _activeRefreshRateHz = MutableStateFlow(60f)
+    val activeRefreshRateHz: StateFlow<Float> = _activeRefreshRateHz.asStateFlow()
+
+    // User-Entered Single Google Gemini API Key Vault (Unlocks AI Assistant & AI Image Studio)
+    private val _isGeminiApiKeyConfigured = MutableStateFlow(getStoredGeminiApiKey().isNotBlank())
+    val isGeminiApiKeyConfigured: StateFlow<Boolean> = _isGeminiApiKeyConfigured.asStateFlow()
+
+    private val _maskedGeminiApiKey = MutableStateFlow(maskApiKey(getStoredGeminiApiKey()))
+    val maskedGeminiApiKey: StateFlow<String> = _maskedGeminiApiKey.asStateFlow()
+
+    private val _apiKeyVerificationState = MutableStateFlow<ApiKeyVerificationState>(ApiKeyVerificationState.Idle)
+    val apiKeyVerificationState: StateFlow<ApiKeyVerificationState> = _apiKeyVerificationState.asStateFlow()
 
     // Viewer Modes & Sub-Tools
     private val _viewerDockMode = MutableStateFlow(ViewerDockMode.READ)
@@ -358,9 +386,78 @@ class PdfWorkspaceViewModel(application: Application) : AndroidViewModel(applica
         if (changed) {
             bitmapMemCache.evictAll()
             _activeDocument.value?.let { doc ->
-                renderAllDocumentPages(doc, _activeSnapshot.value)
+                renderWindowAroundPage(doc, _activeSnapshot.value, _currentPageIndex.value)
             }
         }
+    }
+
+    fun setForce144HzPerformanceMode(enabled: Boolean) {
+        updateSettings { it.copy(force144HzPerformanceMode = enabled) }
+        showDynamicToast(
+            if (enabled) "Force 144Hz Mode ON" else "Standard Refresh Mode",
+            if (enabled) "Max Display Hz" else "Auto Hz"
+        )
+    }
+
+    fun updateDetectedRefreshRate(hz: Float) {
+        if (hz > 0f) {
+            _activeRefreshRateHz.value = hz
+        }
+    }
+
+    // ========================================================================
+    // GOOGLE GEMINI API KEY VAULT (SINGLE KEY FOR AI ASSISTANT & IMAGE STUDIO)
+    // ========================================================================
+
+    private fun getStoredGeminiApiKey(): String =
+        geminiKeyPrefs.getString(GEMINI_API_KEY_PREF, "").orEmpty().trim()
+
+    private fun maskApiKey(key: String): String {
+        val clean = key.trim()
+        if (clean.length <= 10) return if (clean.isBlank()) "" else "••••••••"
+        return "${clean.take(6)}••••••${clean.takeLast(4)}"
+    }
+
+    fun saveAndVerifyGeminiApiKey(rawKey: String) {
+        val cleanKey = rawKey.trim()
+        if (cleanKey.length < 12) {
+            _apiKeyVerificationState.value = ApiKeyVerificationState.Error(
+                "Please enter a valid Google Gemini API key."
+            )
+            return
+        }
+        viewModelScope.launch {
+            _apiKeyVerificationState.value = ApiKeyVerificationState.Verifying
+            val verification = AiStudioEngine.verifyGeminiApiKey(cleanKey)
+            verification.fold(
+                onSuccess = { msg ->
+                    geminiKeyPrefs.edit().putString(GEMINI_API_KEY_PREF, cleanKey).commit()
+                    _isGeminiApiKeyConfigured.value = true
+                    _maskedGeminiApiKey.value = maskApiKey(cleanKey)
+                    _apiKeyVerificationState.value = ApiKeyVerificationState.Verified(msg)
+                    showDynamicToast("Gemini AI Activated", "Assistant & Image Studio Unlocked")
+                },
+                onFailure = { err ->
+                    _apiKeyVerificationState.value = ApiKeyVerificationState.Error(
+                        err.message ?: "API key verification failed."
+                    )
+                }
+            )
+        }
+    }
+
+    fun clearGeminiApiKey() {
+        geminiKeyPrefs.edit().remove(GEMINI_API_KEY_PREF).commit()
+        _isGeminiApiKeyConfigured.value = false
+        _maskedGeminiApiKey.value = ""
+        _apiKeyVerificationState.value = ApiKeyVerificationState.Idle
+        _aiAssistantUiState.value = AiAssistantUiState.Idle
+        _aiGenUiState.value = AiGenUiState.Idle
+        showDynamicToast("Gemini API key removed", "AI features locked")
+    }
+
+    fun dismissApiKeyVerificationBanner() {
+        _apiKeyVerificationState.value = ApiKeyVerificationState.Idle
     }
 
     fun setInstantHighlightOnDrag(enabled: Boolean) {
@@ -391,8 +488,16 @@ class PdfWorkspaceViewModel(application: Application) : AndroidViewModel(applica
     }
 
     fun setPreferredAiLanguage(language: AiLanguageOption) {
-        updateSettings { it.copy(preferredAiLanguage = language) }
+        updateSettings { it.copy(preferredAiLanguage = language, customAiLanguage = "") }
         showDynamicToast("AI Language", "${language.label} (${language.nativeName})")
+    }
+
+    fun setCustomAiLanguage(customLanguage: String) {
+        val clean = customLanguage.trim().take(36)
+        updateSettings { it.copy(customAiLanguage = clean) }
+        if (clean.isNotBlank()) {
+            showDynamicToast("AI Language", clean)
+        }
     }
 
     fun setAiAssistantQuery(query: String) {
@@ -405,23 +510,32 @@ class PdfWorkspaceViewModel(application: Application) : AndroidViewModel(applica
     }
 
     fun askDocumentAiAssistant(customQuery: String? = null) {
+        val apiKey = getStoredGeminiApiKey()
+        if (apiKey.isBlank()) {
+            _aiAssistantUiState.value = AiAssistantUiState.Error(
+                query = (customQuery ?: _aiAssistantQuery.value).trim(),
+                message = "Enter and activate your Google Gemini API key to unlock Document AI Assistant."
+            )
+            showDynamicToast("Gemini API Key Required", "Activate in AI Drawer")
+            return
+        }
+
         val doc = _activeDocument.value ?: documents.value.firstOrNull() ?: return
         val rawQuery = (customQuery ?: _aiAssistantQuery.value).trim()
         if (rawQuery.isBlank()) {
             showDynamicToast("Enter a question for the AI Assistant")
             return
         }
-        if (customQuery != null) {
-            _aiAssistantQuery.value = ""
-        } else {
-            _aiAssistantQuery.value = ""
-        }
+        _aiAssistantQuery.value = ""
 
         val pageIdx = _currentPageIndex.value
         val snap = _activeSnapshot.value
         val selectedPassage = _currentTouchSelection.value?.selectedText
             ?: _selectedExistingMarkup.value?.selectedText
-        val lang = _appSettings.value.preferredAiLanguage
+        val settings = _appSettings.value
+        val targetLangLabel = settings.effectiveAiLanguageLabel
+        val targetLangNative = settings.effectiveAiLanguageNative
+        val targetLangBadge = settings.effectiveAiLanguageBadge
         val pageBmp = _pageBitmaps.value[pageIdx]
 
         val contextBadge = buildString {
@@ -432,18 +546,17 @@ class PdfWorkspaceViewModel(application: Application) : AndroidViewModel(applica
             if (snap.formFields.isNotEmpty()) {
                 append(" • ${snap.formFields.size} Fields")
             }
-            append(" • ${lang.shortCode}")
+            append(" • $targetLangBadge")
         }
 
         aiAssistantJob?.cancel()
         aiAssistantJob = viewModelScope.launch {
             _aiAssistantUiState.value = AiAssistantUiState.Streaming(
                 query = rawQuery,
-                partialText = "Reading document context (${lang.label})…",
+                partialText = "Reading document context ($targetLangLabel)…",
                 contextBadge = contextBadge
             )
 
-            // Build structured document context from all indexed pages, highlights, sticky notes, and AcroForm fields
             val docContext = withContext(Dispatchers.Default) {
                 buildString {
                     appendLine("Active Page: Page ${pageIdx + 1} of ${doc.pageCount}")
@@ -456,7 +569,6 @@ class PdfWorkspaceViewModel(application: Application) : AndroidViewModel(applica
                         }
                     }
 
-                    // Other pages summary
                     val otherPages = snap.pageWords.keys.sorted().filter { it != pageIdx }
                     if (otherPages.isNotEmpty()) {
                         appendLine("\n--- OTHER PAGES IN DOCUMENT ---")
@@ -469,7 +581,6 @@ class PdfWorkspaceViewModel(application: Application) : AndroidViewModel(applica
                         }
                     }
 
-                    // User highlights & notes
                     if (snap.markups.isNotEmpty()) {
                         appendLine("\n--- USER HIGHLIGHTS & NOTES ---")
                         snap.markups.take(15).forEach { m ->
@@ -479,7 +590,6 @@ class PdfWorkspaceViewModel(application: Application) : AndroidViewModel(applica
                         }
                     }
 
-                    // Sticky notes & text boxes
                     if (snap.placedElements.isNotEmpty()) {
                         appendLine("\n--- PLACED STICKY NOTES & ANNOTATIONS ---")
                         snap.placedElements.take(12).forEach { el ->
@@ -487,7 +597,6 @@ class PdfWorkspaceViewModel(application: Application) : AndroidViewModel(applica
                         }
                     }
 
-                    // Interactive AcroForm fields
                     if (snap.formFields.isNotEmpty()) {
                         appendLine("\n--- INTERACTIVE ACROFORM FIELDS ---")
                         snap.formFields.forEach { f ->
@@ -503,13 +612,15 @@ class PdfWorkspaceViewModel(application: Application) : AndroidViewModel(applica
             }
 
             val result = AiStudioEngine.askDocumentAssistant(
+                apiKey = apiKey,
                 userQuery = rawQuery,
                 documentTitle = doc.title,
                 currentPageIndex = pageIdx,
                 totalPages = doc.pageCount,
                 documentContextText = docContext,
                 selectedTextPassage = selectedPassage,
-                preferredLanguage = lang,
+                targetLanguageLabel = targetLangLabel,
+                targetLanguageNative = targetLangNative,
                 currentPageBitmap = pageBmp,
                 onStreamingChunk = { partial ->
                     _aiAssistantUiState.value = AiAssistantUiState.Streaming(
@@ -727,63 +838,100 @@ class PdfWorkspaceViewModel(application: Application) : AndroidViewModel(applica
             _isReflowMode.value = false
             _currentTouchSelection.value = null
             _selectedExistingMarkup.value = null
-            renderAllDocumentPages(updatedDoc, snapshot)
+            _pageBitmaps.value = emptyMap()
+            _pageAspectRatios.value = emptyMap()
+            renderWindowAroundPage(updatedDoc, snapshot, startPage)
         }
     }
 
     fun closeActiveDocument() {
+        renderWindowJob?.cancel()
         persistCurrentDocumentState()
         _activeDocument.value = null
         _pageBitmaps.value = emptyMap()
+        _pageAspectRatios.value = emptyMap()
         _currentTouchSelection.value = null
         _selectedExistingMarkup.value = null
     }
 
-    private fun renderAllDocumentPages(
+    /**
+     * Ultra-smooth 144Hz Viewport-Windowed PDF Renderer:
+     * Renders ONLY the active page first, then immediately adjacent neighbors (±1, ±2, +3),
+     * publishes real per-page aspect ratios so imported PDFs never distort highlight hitboxes,
+     * and enriches imported pages with detected text lines immediately per page (never clobbering user markups).
+     */
+    private fun renderWindowAroundPage(
         doc: PdfDocumentEntity,
-        snapshot: DocumentAnnotationsSnapshot
+        snapshot: DocumentAnnotationsSnapshot,
+        centerPage: Int
     ) {
-        viewModelScope.launch(Dispatchers.IO) {
+        renderWindowJob?.cancel()
+        renderWindowJob = viewModelScope.launch(Dispatchers.IO) {
             val file = File(doc.filePath)
             if (!file.exists()) return@launch
             val count = doc.pageCount.coerceAtLeast(1)
+            val safeCenter = centerPage.coerceIn(0, count - 1)
             val targetWidth = _appSettings.value.renderQuality.targetWidthPx
-            val map = mutableMapOf<Int, Bitmap>()
-            val updatedWordsMap = snapshot.pageWords.toMutableMap()
-            var wordsChanged = false
 
-            for (idx in 0 until count) {
-                val rot = snapshot.pageRotations[idx] ?: 0
+            // Priority order: center page first, then immediate neighbors
+            val windowIndices = buildList {
+                add(safeCenter)
+                for (delta in 1..3) {
+                    if (safeCenter + delta < count) add(safeCenter + delta)
+                    if (delta <= 2 && safeCenter - delta >= 0) add(safeCenter - delta)
+                }
+            }
+
+            val bitmapsMap = _pageBitmaps.value.toMutableMap()
+            val ratiosMap = _pageAspectRatios.value.toMutableMap()
+            var anyNewWords = false
+
+            for (idx in windowIndices) {
+                if (_activeDocument.value?.id != doc.id) return@launch
+                val rot = _activeSnapshot.value.pageRotations[idx] ?: snapshot.pageRotations[idx] ?: 0
                 val cacheKey = "${doc.id}_${file.lastModified()}_p${idx}_r${rot}_w${targetWidth}"
                 val cached = bitmapMemCache.get(cacheKey)
                 val bmp = if (cached != null && !cached.isRecycled) {
                     cached
                 } else {
-                    PdfProEngine.renderPageBitmap(file, idx, targetWidthPx = targetWidth, rotationDegrees = rot)?.also {
+                    PdfProEngine.renderPageBitmap(
+                        file,
+                        idx,
+                        targetWidthPx = targetWidth,
+                        rotationDegrees = rot
+                    )?.also {
                         bitmapMemCache.put(cacheKey, it)
                     }
                 }
-                if (bmp != null) {
-                    map[idx] = bmp
-                    _pageBitmaps.value = map.toMap()
 
-                    // Automatically detect text lines & word bounding boxes on imported PDFs that lack pre-indexed words!
-                    if (updatedWordsMap[idx].isNullOrEmpty()) {
+                if (bmp != null) {
+                    bitmapsMap[idx] = bmp
+                    val aspect = (bmp.width.toFloat() / bmp.height.toFloat().coerceAtLeast(1f))
+                        .coerceIn(0.45f, 2.2f)
+                    ratiosMap[idx] = aspect
+                    _pageBitmaps.value = bitmapsMap.toMap()
+                    _pageAspectRatios.value = ratiosMap.toMap()
+
+                    // Immediately detect text lines on imported PDFs for this rendered page!
+                    val liveSnap = _activeSnapshot.value
+                    if (liveSnap.pageWords[idx].isNullOrEmpty()) {
                         val detectedWords = PdfProEngine.detectTextWordsFromPageBitmap(bmp, idx)
-                        if (detectedWords.isNotEmpty()) {
-                            updatedWordsMap[idx] = detectedWords
-                            wordsChanged = true
+                        if (detectedWords.isNotEmpty() && _activeDocument.value?.id == doc.id) {
+                            val latestSnap = _activeSnapshot.value
+                            val mergedWords = latestSnap.pageWords.toMutableMap().apply {
+                                put(idx, detectedWords)
+                            }
+                            _activeSnapshot.value = latestSnap.copy(pageWords = mergedWords)
+                            anyNewWords = true
                         }
                     }
                 }
             }
 
-            if (wordsChanged && _activeDocument.value?.id == doc.id) {
-                val enrichedSnapshot = _activeSnapshot.value.copy(pageWords = updatedWordsMap.toMap())
-                _activeSnapshot.value = enrichedSnapshot
-                val updatedDoc = doc.copy(annotationsJson = enrichedSnapshot.toJsonString())
+            if (anyNewWords && _activeDocument.value?.id == doc.id) {
+                val latestDoc = _activeDocument.value ?: return@launch
+                val updatedDoc = latestDoc.copy(annotationsJson = _activeSnapshot.value.toJsonString())
                 repository.upsertDocument(updatedDoc)
-                _activeDocument.value = updatedDoc
             }
         }
     }
@@ -791,13 +939,14 @@ class PdfWorkspaceViewModel(application: Application) : AndroidViewModel(applica
     /**
      * Called during LazyColumn / Pager scrolling.
      * Updates `_currentPageIndex` in memory WITHOUT mutating `_activeDocument.value`
-     * on every frame so scrolling stays 120fps with zero UI tree rebuilds.
+     * on every frame so scrolling stays 120–144Hz smooth with zero UI tree rebuilds.
      */
     fun onPageScrolled(pageIndex: Int) {
         val doc = _activeDocument.value ?: return
         val clamped = pageIndex.coerceIn(0, (doc.pageCount - 1).coerceAtLeast(0))
         if (_currentPageIndex.value == clamped) return
         _currentPageIndex.value = clamped
+        renderWindowAroundPage(doc, _activeSnapshot.value, clamped)
         pagePersistJob?.cancel()
         pagePersistJob = viewModelScope.launch(Dispatchers.IO) {
             delay(650L)
@@ -813,6 +962,7 @@ class PdfWorkspaceViewModel(application: Application) : AndroidViewModel(applica
         _currentPageIndex.value = clamped
         _currentTouchSelection.value = null
         _selectedExistingMarkup.value = null
+        renderWindowAroundPage(doc, _activeSnapshot.value, clamped)
         pagePersistJob?.cancel()
         pagePersistJob = viewModelScope.launch(Dispatchers.IO) {
             delay(500L)
@@ -990,6 +1140,32 @@ class PdfWorkspaceViewModel(application: Application) : AndroidViewModel(applica
         val pageIdx = _currentPageIndex.value
         val words = _activeSnapshot.value.pageWords[pageIdx].orEmpty()
         _currentTouchSelection.value = TextMarkupEngine.expandSelectionToParagraph(words, curr)
+    }
+
+    /**
+     * Independent Left Handle Drag:
+     * Moves ONLY the left/start edge while keeping the right/end edge strictly locked.
+     */
+    fun adjustSelectionLeftHandle(pageIndex: Int, newLeftPoint: NormalizedPoint) {
+        val curr = _currentTouchSelection.value ?: return
+        if (_currentPageIndex.value != pageIndex) {
+            _currentPageIndex.value = pageIndex
+        }
+        val words = _activeSnapshot.value.pageWords[pageIndex].orEmpty()
+        _currentTouchSelection.value = TextMarkupEngine.adjustLeftHandle(words, curr, newLeftPoint)
+    }
+
+    /**
+     * Independent Right Handle Drag:
+     * Moves ONLY the right/end edge while keeping the left/start edge strictly locked.
+     */
+    fun adjustSelectionRightHandle(pageIndex: Int, newRightPoint: NormalizedPoint) {
+        val curr = _currentTouchSelection.value ?: return
+        if (_currentPageIndex.value != pageIndex) {
+            _currentPageIndex.value = pageIndex
+        }
+        val words = _activeSnapshot.value.pageWords[pageIndex].orEmpty()
+        _currentTouchSelection.value = TextMarkupEngine.adjustRightHandle(words, curr, newRightPoint)
     }
 
     fun onTouchSelectionFingerLift(pageIndex: Int) {
@@ -1494,6 +1670,8 @@ class PdfWorkspaceViewModel(application: Application) : AndroidViewModel(applica
             )
             if (bmp != null) {
                 _pageBitmaps.value = _pageBitmaps.value.toMutableMap().apply { put(pageIndex, bmp) }
+                val aspect = (bmp.width.toFloat() / bmp.height.toFloat().coerceAtLeast(1f)).coerceIn(0.45f, 2.2f)
+                _pageAspectRatios.value = _pageAspectRatios.value.toMutableMap().apply { put(pageIndex, aspect) }
             }
             withContext(Dispatchers.Main) {
                 showDynamicToast("Rotated Page ${pageIndex + 1}", "${nextRot}°")
@@ -1526,14 +1704,14 @@ class PdfWorkspaceViewModel(application: Application) : AndroidViewModel(applica
                 repository.upsertDocument(updatedDoc)
                 _activeDocument.value = updatedDoc
                 bitmapMemCache.evictAll()
-                renderAllDocumentPages(updatedDoc, _activeSnapshot.value)
+                renderWindowAroundPage(updatedDoc, _activeSnapshot.value, updatedDoc.currentPage)
                 showDynamicToast(actionLabel, "$newCount pages")
             }
         }
     }
 
     // ========================================================================
-    // AI IMAGE & STAMP STUDIO (1K/2K/4K + 8 ASPECT RATIOS + AI SMART STAMPS + PRESETS)
+    // AI IMAGE & STAMP STUDIO (GATED BY USER GEMINI API KEY + OFFLINE SEALS)
     // ========================================================================
 
     fun setAiStudioSheetVisible(visible: Boolean) {
@@ -1557,6 +1735,14 @@ class PdfWorkspaceViewModel(application: Application) : AndroidViewModel(applica
     }
 
     fun generateAiStudioImage() {
+        val apiKey = getStoredGeminiApiKey()
+        if (apiKey.isBlank()) {
+            _aiGenUiState.value = AiGenUiState.Error(
+                "Please enter and activate your Google Gemini API key first to generate AI images."
+            )
+            showDynamicToast("Gemini API Key Required")
+            return
+        }
         val promptText = _aiPrompt.value.trim()
         if (promptText.isBlank()) {
             _aiGenUiState.value = AiGenUiState.Error("Please enter a description for the visual stamp or cover.")
@@ -1565,6 +1751,7 @@ class PdfWorkspaceViewModel(application: Application) : AndroidViewModel(applica
         viewModelScope.launch {
             _aiGenUiState.value = AiGenUiState.Loading
             val result = AiStudioEngine.generateStudioImage(
+                apiKey = apiKey,
                 prompt = promptText,
                 modelOption = _selectedAiModel.value,
                 sizeOption = _selectedAiSize.value,
@@ -1586,15 +1773,20 @@ class PdfWorkspaceViewModel(application: Application) : AndroidViewModel(applica
         }
     }
 
-    /**
-     * Generates an AI-designed Architectural / Legal Stamp using `gemini-3.8-flash` Structured JSON
-     * (works without requiring a Blaze billing plan!).
-     */
     fun generateAiSmartVectorStamp() {
+        val apiKey = getStoredGeminiApiKey()
+        if (apiKey.isBlank()) {
+            _aiGenUiState.value = AiGenUiState.Error(
+                "Please enter and activate your Google Gemini API key first to generate AI Smart Seals."
+            )
+            showDynamicToast("Gemini API Key Required")
+            return
+        }
         val promptText = _aiPrompt.value.trim().ifBlank { "Approved Architectural Review Seal" }
         viewModelScope.launch {
             _aiGenUiState.value = AiGenUiState.Loading
             val result = AiStudioEngine.generateAiSmartStamp(
+                apiKey = apiKey,
                 prompt = promptText,
                 authorName = _appSettings.value.defaultAuthorName,
                 sizeOption = _selectedAiSize.value,
@@ -2087,6 +2279,14 @@ class PdfWorkspaceViewModel(application: Application) : AndroidViewModel(applica
     }
 
     fun executeVisionOcrScan(doc: PdfDocumentEntity, pageIndex: Int = 0) {
+        val apiKey = getStoredGeminiApiKey()
+        if (apiKey.isBlank()) {
+            _ocrUiState.value = OcrUiState.Error(
+                "Please enter your Google Gemini API key in Settings or the AI Drawer to run Vision OCR."
+            )
+            showDynamicToast("Gemini API Key Required for Vision OCR")
+            return
+        }
         viewModelScope.launch {
             _ocrUiState.value = OcrUiState.Scanning
             val bmp = PdfProEngine.renderPageBitmap(File(doc.filePath), pageIndex, targetWidthPx = 1200)
@@ -2096,7 +2296,7 @@ class PdfWorkspaceViewModel(application: Application) : AndroidViewModel(applica
             }
             val snap = DocumentAnnotationsSnapshot.fromJsonString(doc.annotationsJson)
             val existingWords = snap.pageWords[pageIndex].orEmpty()
-            val result = AiStudioEngine.performVisionOcrOnPage(bmp, existingWords)
+            val result = AiStudioEngine.performVisionOcrOnPage(apiKey, bmp, existingWords)
             result.fold(
                 onSuccess = { ocrResult ->
                     val newWordsMap = snap.pageWords.toMutableMap().apply {

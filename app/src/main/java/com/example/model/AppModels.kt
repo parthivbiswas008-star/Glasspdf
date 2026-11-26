@@ -525,12 +525,13 @@ enum class PdfCanvasPaperTint(val label: String, val tintHex: String) {
     ORIGINAL("Original Paper", "#FAF8F3"),
     WARM_SEPIA("Warm Sepia", "#F3E9D2"),
     SAGE_EYECARE("Sage Eye-Care", "#E6EFE9"),
-    NIGHT_CONTRAST("Night Contrast", "#22252A")
+    NIGHT_CONTRAST("Night Contrast", "#22252A"),
+    AMOLED_DARK("AMOLED Black", "#000000")
 }
 
 enum class RenderQualityMode(val label: String, val targetWidthPx: Int, val subtitle: String) {
-    FAST_60FPS("Fast 120Hz", 880, "Ultra-low latency scrolling"),
-    BALANCED_HD("Balanced HD", 1120, "Crisp typography & fast pan"),
+    FAST_60FPS("Ultra 144Hz", 900, "Zero-jank high refresh scrolling"),
+    BALANCED_HD("Balanced HD", 1160, "Crisp typography & fast pan"),
     ULTRA_PRINT("Ultra Print", 1480, "Maximum vector & diagram detail")
 }
 
@@ -540,14 +541,14 @@ enum class AiLanguageOption(
     val nativeName: String
 ) {
     ENGLISH("EN", "English", "English"),
+    BENGALI("BN", "Bengali", "বাংলা"),
+    HINDI("HI", "Hindi", "हिन्दी"),
     SPANISH("ES", "Spanish", "Español"),
     FRENCH("FR", "French", "Français"),
     GERMAN("DE", "German", "Deutsch"),
-    HINDI("HI", "Hindi", "हिन्दी"),
-    BENGALI("BN", "Bengali", "বাংলা"),
+    ARABIC("AR", "Arabic", "العربية"),
     JAPANESE("JA", "Japanese", "日本語"),
     CHINESE("ZH", "Chinese", "中文"),
-    ARABIC("AR", "Arabic", "العربية"),
     PORTUGUESE("PT", "Portuguese", "Português");
 
     val shortCode: String get() = code
@@ -563,15 +564,26 @@ data class AppSettings(
     val scrollDirection: PageScrollDirection = PageScrollDirection.VERTICAL_CONTINUOUS,
     val paperTint: PdfCanvasPaperTint = PdfCanvasPaperTint.ORIGINAL,
     val renderQuality: RenderQualityMode = RenderQualityMode.BALANCED_HD,
-    val instantHighlightOnDrag: Boolean = true,
+    val instantHighlightOnDrag: Boolean = false,
     val autoCopyHighlightedText: Boolean = false,
     val keepScreenAwake: Boolean = true,
     val showFastScrollScrubber: Boolean = true,
     val rememberLastPage: Boolean = true,
     val defaultAuthorName: String = "Elena Rostova",
-    val defaultHighlightOpacity: Float = 0.42f,
-    val preferredAiLanguage: AiLanguageOption = AiLanguageOption.ENGLISH
+    val defaultHighlightOpacity: Float = 0.46f,
+    val preferredAiLanguage: AiLanguageOption = AiLanguageOption.ENGLISH,
+    val customAiLanguage: String = "",
+    val force144HzPerformanceMode: Boolean = true
 ) {
+    val effectiveAiLanguageLabel: String
+        get() = customAiLanguage.trim().ifBlank { preferredAiLanguage.label }
+
+    val effectiveAiLanguageNative: String
+        get() = customAiLanguage.trim().ifBlank { preferredAiLanguage.nativeName }
+
+    val effectiveAiLanguageBadge: String
+        get() = customAiLanguage.trim().take(4).uppercase().ifBlank { preferredAiLanguage.shortCode }
+
     fun toJsonString(): String = JSONObject().apply {
         put("themeMode", themeMode.name)
         put("reflowTheme", reflowTheme.name)
@@ -587,6 +599,8 @@ data class AppSettings(
         put("defaultAuthorName", defaultAuthorName)
         put("defaultHighlightOpacity", defaultHighlightOpacity.toDouble())
         put("preferredAiLanguage", preferredAiLanguage.name)
+        put("customAiLanguage", customAiLanguage)
+        put("force144HzPerformanceMode", force144HzPerformanceMode)
     }.toString()
 
     companion object {
@@ -620,14 +634,16 @@ data class AppSettings(
                     scrollDirection = scroll,
                     paperTint = tint,
                     renderQuality = quality,
-                    instantHighlightOnDrag = obj.optBoolean("instantHighlightOnDrag", true),
+                    instantHighlightOnDrag = obj.optBoolean("instantHighlightOnDrag", false),
                     autoCopyHighlightedText = obj.optBoolean("autoCopyHighlightedText", false),
                     keepScreenAwake = obj.optBoolean("keepScreenAwake", true),
                     showFastScrollScrubber = obj.optBoolean("showFastScrollScrubber", true),
                     rememberLastPage = obj.optBoolean("rememberLastPage", true),
                     defaultAuthorName = obj.optString("defaultAuthorName", "Elena Rostova"),
-                    defaultHighlightOpacity = obj.optDouble("defaultHighlightOpacity", 0.42).toFloat().coerceIn(0.25f, 0.75f),
-                    preferredAiLanguage = aiLang
+                    defaultHighlightOpacity = obj.optDouble("defaultHighlightOpacity", 0.46).toFloat().coerceIn(0.25f, 0.78f),
+                    preferredAiLanguage = aiLang,
+                    customAiLanguage = obj.optString("customAiLanguage", ""),
+                    force144HzPerformanceMode = obj.optBoolean("force144HzPerformanceMode", true)
                 )
             } catch (_: Exception) {
                 AppSettings()
@@ -637,10 +653,7 @@ data class AppSettings(
 }
 
 /**
- * AI Image Studio configurations:
- * - Models: gemini-nano-banana-2.1 (Fast/General), gemini-3-pro-image (Studio Pro), gemini-3.1-flash-lite-image
- * - Image sizes: 1K, 2K, 4K
- * - Aspect ratios: 1:1, 2:3, 3:2, 3:4, 4:3, 9:16, 16:9, 21:9
+ * AI Image Studio configurations powered by the user's Google Gemini API Key:
  */
 enum class AiImageModelOption(
     val modelId: String,
@@ -648,19 +661,19 @@ enum class AiImageModelOption(
     val subtitle: String
 ) {
     NANO_BANANA_2_1(
-        modelId = "gemini-nano-banana-2.1",
-        displayName = "Nano Banana 2.1",
-        subtitle = "Fast interactive synthesis"
+        modelId = "gemini-2.0-flash-exp-image-generation",
+        displayName = "Gemini Flash Image",
+        subtitle = "Fast native synthesis"
     ),
     GEMINI_3_PRO_IMAGE(
-        modelId = "gemini-3-pro-image",
-        displayName = "Gemini 3 Pro Image",
-        subtitle = "Studio 4K & typography"
+        modelId = "imagen-3.0-generate-002",
+        displayName = "Imagen 3 Studio",
+        subtitle = "High-detail editorial art"
     ),
     GEMINI_3_1_FLASH_LITE_IMAGE(
-        modelId = "gemini-3.1-flash-lite-image",
-        displayName = "Flash-Lite Image",
-        subtitle = "Ultra-low latency"
+        modelId = "gemini-2.5-flash-image-preview",
+        displayName = "Gemini 2.5 Image",
+        subtitle = "Next-gen visual studio"
     )
 }
 

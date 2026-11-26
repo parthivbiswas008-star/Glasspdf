@@ -1,5 +1,7 @@
 package com.example
 
+import android.app.Activity
+import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -8,18 +10,22 @@ import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.Crossfade
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
+import androidx.core.view.WindowCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.ui.components.DynamicIslandToast
+import com.example.ui.theme.GlassThemeMode
 import com.example.ui.home.AppHomeShell
 import com.example.ui.sheets.AiImageStudioSheet
 import com.example.ui.sheets.NavigatorGlassSheet
@@ -88,6 +94,59 @@ fun GlassPdfProApp(
         onDispose {
             localView.keepScreenOn = false
         }
+    }
+
+    // Apply Force 144Hz High-Refresh Performance Mode via Window Display.Mode
+    LaunchedEffect(appSettings.force144HzPerformanceMode) {
+        val activity = context as? Activity ?: return@LaunchedEffect
+        val window = activity.window ?: return@LaunchedEffect
+        val display = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            activity.display
+        } else {
+            @Suppress("DEPRECATION")
+            activity.windowManager.defaultDisplay
+        }
+        val params = window.attributes
+        if (display != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            val currentMode = display.mode
+            val sameResModes = display.supportedModes.filter {
+                it.physicalWidth == currentMode.physicalWidth &&
+                    it.physicalHeight == currentMode.physicalHeight
+            }.ifEmpty { display.supportedModes.toList() }
+
+            if (appSettings.force144HzPerformanceMode) {
+                val bestMode = sameResModes.maxByOrNull { it.refreshRate }
+                if (bestMode != null) {
+                    params.preferredDisplayModeId = bestMode.modeId
+                    params.preferredRefreshRate = bestMode.refreshRate.coerceAtLeast(144f)
+                    window.attributes = params
+                    workspaceViewModel.updateDetectedRefreshRate(bestMode.refreshRate)
+                } else {
+                    params.preferredRefreshRate = 144f
+                    window.attributes = params
+                    workspaceViewModel.updateDetectedRefreshRate(currentMode.refreshRate)
+                }
+            } else {
+                params.preferredDisplayModeId = 0
+                params.preferredRefreshRate = 0f
+                window.attributes = params
+                workspaceViewModel.updateDetectedRefreshRate(currentMode.refreshRate)
+            }
+        }
+    }
+
+    // Sync system bar icon contrast cleanly for Light, Dark, and AMOLED True Black
+    val systemDark = isSystemInDarkTheme()
+    val useDarkStatusIcons = when (themeMode) {
+        GlassThemeMode.LIGHT_ALABASTER -> true
+        GlassThemeMode.DARK_OBSIDIAN, GlassThemeMode.AMOLED_BLACK -> false
+        GlassThemeMode.AUTO_SYSTEM -> !systemDark
+    }
+    LaunchedEffect(useDarkStatusIcons, localView) {
+        val activity = context as? Activity ?: return@LaunchedEffect
+        val controller = WindowCompat.getInsetsController(activity.window, localView)
+        controller.isAppearanceLightStatusBars = useDarkStatusIcons
+        controller.isAppearanceLightNavigationBars = useDarkStatusIcons
     }
 
     // Zero-permission Android SAF Document Picker for PDFs & Images

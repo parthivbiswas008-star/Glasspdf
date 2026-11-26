@@ -176,5 +176,23 @@ class ExampleRobolectricTest {
         assertEquals(com.example.model.AiLanguageOption.SPANISH, restoredSettings.preferredAiLanguage)
         assertEquals("ES", restoredSettings.preferredAiLanguage.shortCode)
     }
+
+    @Test
+    fun `appSettings persists AMOLED theme, Force 144Hz mode, and custom AI language`() {
+        val amoledSettings = AppSettings(
+            themeMode = GlassThemeMode.AMOLED_BLACK,
+            paperTint = PdfCanvasPaperTint.AMOLED_DARK,
+            force144HzPerformanceMode = true,
+            customAiLanguage = "Bangla (বাংলা)"
+        )
+        val restored = AppSettings.fromJsonString(amoledSettings.toJsonString())
+        assertEquals(GlassThemeMode.AMOLED_BLACK, restored.themeMode)
+        assertEquals(PdfCanvasPaperTint.AMOLED_DARK, restored.paperTint)
+        assertTrue(restored.force144HzPerformanceMode)
+        assertEquals("Bangla (বাংলা)", restored.customAiLanguage)
+        assertEquals("Bangla (বাংলা)", restored.effectiveAiLanguageLabel)
+        assertEquals("BANG", restored.effectiveAiLanguageBadge)
+    }
 }
+
 

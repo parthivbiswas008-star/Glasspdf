@@ -78,9 +78,14 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.CheckBox
 import androidx.compose.material.icons.filled.CheckBoxOutlineBlank
 import androidx.compose.material.icons.filled.Draw
+import androidx.compose.material.icons.filled.Key
 import androidx.compose.material.icons.filled.RadioButtonChecked
 import androidx.compose.material.icons.filled.RadioButtonUnchecked
 import androidx.compose.material.icons.filled.TextFields
+import androidx.compose.material.icons.filled.Visibility
+import androidx.compose.material.icons.filled.VisibilityOff
+import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.text.input.VisualTransformation
 import com.example.data.local.PdfDocumentEntity
 import com.example.model.AiAspectRatioOption
 import com.example.model.AiImageModelOption
@@ -93,12 +98,13 @@ import com.example.model.ProToolWorkflow
 import com.example.model.StudioGalleryAsset
 import com.example.ui.components.GlassPill
 import com.example.ui.components.GlassSheet
-import com.example.ui.theme.EditorialHighlightSwatches
+import com.example.ui.theme.FluorescentHighlightSwatches
 import com.example.ui.theme.JetBrainsTabularFamily
 import com.example.ui.theme.LocalLiquidGlass
 import com.example.ui.theme.SignatureFontOptions
 import com.example.ui.viewer.parseComposeHex
 import com.example.viewmodel.AiGenUiState
+import com.example.viewmodel.ApiKeyVerificationState
 import com.example.viewmodel.OcrUiState
 import com.example.viewmodel.PdfWorkspaceViewModel
 
@@ -124,18 +130,20 @@ fun PropertiesGlassSheet(
 
     GlassSheet(
         visible = visible,
-        title = "Style & Optical Properties",
-        subtitle = "Editorial Non-Neon Swatches, Stroke & Opacity",
+        title = "Style & Fluorescent Ink",
+        subtitle = "Fluorescent Neon Swatches, Stroke & Opacity",
         onDismiss = onDismiss
     ) {
         Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
-            Text("Editorial Swatches", style = MaterialTheme.typography.labelLarge, color = glass.primaryText)
+            Text("Fluorescent Highlighter Swatches", style = MaterialTheme.typography.labelLarge, color = glass.primaryText)
             Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                EditorialHighlightSwatches.forEach { swatch ->
+                FluorescentHighlightSwatches.forEach { swatch ->
                     val selected = swatch.hex.equals(activeColorHex, ignoreCase = true)
                     Column(
                         horizontalAlignment = Alignment.CenterHorizontally,
@@ -144,10 +152,16 @@ fun PropertiesGlassSheet(
                         Box(
                             modifier = Modifier
                                 .size(38.dp)
+                                .shadow(
+                                    elevation = if (selected) 10.dp else 4.dp,
+                                    shape = CircleShape,
+                                    ambientColor = swatch.glowColor,
+                                    spotColor = swatch.glowColor
+                                )
                                 .clip(CircleShape)
                                 .background(swatch.color)
                                 .border(
-                                    width = if (selected) 3.dp else 1.dp,
+                                    width = if (selected) 3.dp else 1.2.dp,
                                     color = if (selected) glass.primaryText else Color.White,
                                     shape = CircleShape
                                 )
@@ -155,7 +169,7 @@ fun PropertiesGlassSheet(
                             contentAlignment = Alignment.Center
                         ) {
                             if (selected) {
-                                Icon(Icons.Default.Check, null, tint = Color(0xFF1C1E21), modifier = Modifier.size(16.dp))
+                                Icon(Icons.Default.Check, null, tint = Color(0xFF101216), modifier = Modifier.size(16.dp))
                             }
                         }
                         Text(swatch.name, style = MaterialTheme.typography.labelSmall, color = glass.secondaryText)
@@ -604,10 +618,202 @@ fun SignaturePadModal(
 }
 
 /**
+ * Reusable Inline Google Gemini API Key Activation Card shared by:
+ * - Slide-Out AI Assistant Drawer (MobilePdfViewer)
+ * - AI Image & Stamp Studio Sheet (GlassWorkspaceSheets)
+ * - Settings Vault (AppHomeShell)
+ */
+@Composable
+fun GeminiApiKeyActivationCard(
+    isConfigured: Boolean,
+    maskedKey: String,
+    verificationState: ApiKeyVerificationState,
+    onVerifyAndActivate: (String) -> Unit,
+    onRemoveKey: () -> Unit,
+    modifier: Modifier = Modifier,
+    title: String = "Activate Google Gemini AI",
+    subtitle: String = "Enter one Google Gemini API key to unlock Document AI Chat, multi-language summaries, Vision OCR & AI Image Generator."
+) {
+    val glass = LocalLiquidGlass.current
+    var rawKeyInput by remember { mutableStateOf("") }
+    var showKeyText by remember { mutableStateOf(false) }
+    var showEditField by remember(isConfigured) { mutableStateOf(!isConfigured) }
+
+    Column(
+        modifier = modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(20.dp))
+            .background(glass.accentSoft.copy(alpha = 0.55f))
+            .border(1.dp, glass.rimBorder, RoundedCornerShape(20.dp))
+            .padding(14.dp)
+            .testTag("gemini_api_key_activation_card"),
+        verticalArrangement = Arrangement.spacedBy(10.dp)
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                modifier = Modifier.weight(1f)
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Key,
+                    contentDescription = null,
+                    tint = if (isConfigured) glass.accent else glass.goldBadge,
+                    modifier = Modifier.size(18.dp)
+                )
+                Text(
+                    text = if (isConfigured) "Gemini AI Active" else title,
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.SemiBold,
+                    color = glass.primaryText
+                )
+            }
+            Box(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(50))
+                    .background(
+                        if (isConfigured) Color(0xFF22C55E).copy(alpha = 0.22f)
+                        else glass.goldBadge.copy(alpha = 0.22f)
+                    )
+                    .padding(horizontal = 8.dp, vertical = 3.dp)
+            ) {
+                Text(
+                    text = if (isConfigured) "ACTIVE" else "KEY REQUIRED",
+                    fontFamily = JetBrainsTabularFamily,
+                    fontWeight = FontWeight.Bold,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = if (isConfigured) Color(0xFF22C55E) else glass.goldBadge
+                )
+            }
+        }
+
+        if (isConfigured && !showEditField) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = "Key: $maskedKey",
+                    fontFamily = JetBrainsTabularFamily,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = glass.secondaryText
+                )
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    GlassPill(
+                        onClick = { showEditField = true },
+                        contentPaddingHorizontal = 10.dp,
+                        contentPaddingVertical = 6.dp,
+                        modifier = Modifier.testTag("gemini_key_change_button")
+                    ) {
+                        Text("Change", style = MaterialTheme.typography.labelSmall, color = glass.primaryText)
+                    }
+                    GlassPill(
+                        onClick = onRemoveKey,
+                        contentPaddingHorizontal = 10.dp,
+                        contentPaddingVertical = 6.dp,
+                        modifier = Modifier.testTag("gemini_key_remove_button")
+                    ) {
+                        Text("Lock", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.error)
+                    }
+                }
+            }
+        } else {
+            Text(
+                text = subtitle,
+                style = MaterialTheme.typography.bodySmall,
+                color = glass.secondaryText
+            )
+
+            OutlinedTextField(
+                value = rawKeyInput,
+                onValueChange = { rawKeyInput = it },
+                label = { Text("Google Gemini API Key (AIza…)") },
+                singleLine = true,
+                visualTransformation = if (showKeyText) VisualTransformation.None else PasswordVisualTransformation(),
+                trailingIcon = {
+                    IconButton(onClick = { showKeyText = !showKeyText }) {
+                        Icon(
+                            imageVector = if (showKeyText) Icons.Default.VisibilityOff else Icons.Default.Visibility,
+                            contentDescription = if (showKeyText) "Hide API key" else "Show API key",
+                            tint = glass.secondaryText
+                        )
+                    }
+                },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag("gemini_api_key_input")
+            )
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                GlassPill(
+                    onClick = {
+                        onVerifyAndActivate(rawKeyInput)
+                    },
+                    isSelected = true,
+                    modifier = Modifier
+                        .weight(1f)
+                        .testTag("gemini_api_key_activate_button")
+                ) {
+                    if (verificationState is ApiKeyVerificationState.Verifying) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(15.dp),
+                            strokeWidth = 2.dp,
+                            color = glass.accent
+                        )
+                        Spacer(Modifier.width(6.dp))
+                        Text("Verifying…", style = MaterialTheme.typography.labelLarge, color = glass.primaryText)
+                    } else {
+                        Icon(Icons.Default.AutoAwesome, null, tint = glass.goldBadge, modifier = Modifier.size(16.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text("Verify & Activate", style = MaterialTheme.typography.labelLarge, color = glass.primaryText)
+                    }
+                }
+
+                if (isConfigured) {
+                    GlassPill(
+                        onClick = { showEditField = false },
+                        contentPaddingHorizontal = 12.dp,
+                        contentPaddingVertical = 9.dp
+                    ) {
+                        Text("Cancel", style = MaterialTheme.typography.labelLarge, color = glass.secondaryText)
+                    }
+                }
+            }
+        }
+
+        when (verificationState) {
+            is ApiKeyVerificationState.Verified -> {
+                Text(
+                    text = "✓ ${verificationState.message}",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = Color(0xFF22C55E)
+                )
+            }
+            is ApiKeyVerificationState.Error -> {
+                Text(
+                    text = verificationState.message,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error
+                )
+            }
+            else -> {}
+        }
+    }
+}
+
+/**
  * 4. AI Image & Stamp Studio Sheet:
- * - Instant 1-Tap Official Editorial Seals (`APPROVED`, `CONFIDENTIAL`, `FINAL ISSUE`, `STUDIO DRAFT`, `EXECUTED`, `VERIFIED`)
- * - AI Smart Vector Stamp (`gemini-3.8-flash` structured JSON synthesis — works on all Firebase tiers)
- * - AI Raster Image Synthesis (`gemini-3.1-flash-image-preview` & `gemini-3-pro-image-preview` with 1K/2K/4K & 8 aspect ratios)
+ * - Instant 1-Tap Official Editorial Seals (always available offline)
+ * - User Gemini API Key Gate unlocking AI Smart Vector Stamp & AI Raster Image Generation
  */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
@@ -622,23 +828,26 @@ fun AiImageStudioSheet(
     val selectedRatio by viewModel.selectedAiAspectRatio.collectAsStateWithLifecycle()
     val prompt by viewModel.aiPrompt.collectAsStateWithLifecycle()
     val uiState by viewModel.aiGenUiState.collectAsStateWithLifecycle()
+    val isApiKeyConfigured by viewModel.isGeminiApiKeyConfigured.collectAsStateWithLifecycle()
+    val maskedApiKey by viewModel.maskedGeminiApiKey.collectAsStateWithLifecycle()
+    val verificationState by viewModel.apiKeyVerificationState.collectAsStateWithLifecycle()
 
     GlassSheet(
         visible = visible,
         title = "AI Image & Stamp Studio",
-        subtitle = "Official Seals, AI Smart Stamps & 1K/2K/4K Image Synthesis",
+        subtitle = "Official Offline Seals & Gemini API Image Synthesis",
         onDismiss = onDismiss
     ) {
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .heightIn(max = 550.dp)
+                .heightIn(max = 560.dp)
                 .verticalScroll(rememberScrollState()),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            // Section A: 1-Tap Official Architectural & Editorial Seals (Instant, 0ms latency)
+            // Section A: 1-Tap Official Architectural & Editorial Seals (Instant, Offline)
             Text(
-                text = "Instant Editorial & Architectural Seals",
+                text = "Instant Offline Editorial Seals",
                 style = MaterialTheme.typography.labelLarge,
                 color = glass.primaryText
             )
@@ -671,132 +880,145 @@ fun AiImageStudioSheet(
                 }
             }
 
-            // Section B: Model Selector (Nano Banana 2.1 vs Gemini 3 Pro Image)
-            Text("1. Studio Model", style = MaterialTheme.typography.labelLarge, color = glass.primaryText)
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .horizontalScroll(rememberScrollState()),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                AiImageModelOption.entries.forEach { modelOpt ->
-                    GlassPill(
-                        onClick = { viewModel.setSelectedAiModel(modelOpt) },
-                        isSelected = selectedModel == modelOpt,
-                        modifier = Modifier.testTag("ai_model_${modelOpt.name}")
-                    ) {
-                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            // Gemini API Key Gate / Status Card
+            GeminiApiKeyActivationCard(
+                isConfigured = isApiKeyConfigured,
+                maskedKey = maskedApiKey,
+                verificationState = verificationState,
+                onVerifyAndActivate = { viewModel.saveAndVerifyGeminiApiKey(it) },
+                onRemoveKey = { viewModel.clearGeminiApiKey() },
+                title = "Activate Gemini API to Generate AI Images",
+                subtitle = "Enter your Google Gemini API key to unlock AI Image Generation & AI Smart Stamps."
+            )
+
+            if (isApiKeyConfigured) {
+                // Section B: Model Selector
+                Text("1. Studio Model", style = MaterialTheme.typography.labelLarge, color = glass.primaryText)
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    AiImageModelOption.entries.forEach { modelOpt ->
+                        GlassPill(
+                            onClick = { viewModel.setSelectedAiModel(modelOpt) },
+                            isSelected = selectedModel == modelOpt,
+                            modifier = Modifier.testTag("ai_model_${modelOpt.name}")
+                        ) {
+                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                Text(
+                                    text = modelOpt.displayName,
+                                    style = MaterialTheme.typography.labelLarge,
+                                    color = glass.primaryText
+                                )
+                                Text(
+                                    text = modelOpt.subtitle,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = glass.secondaryText,
+                                    maxLines = 1
+                                )
+                            }
+                        }
+                    }
+                }
+
+                // Image Resolution Selector: 1K, 2K, 4K
+                Text("2. Output Image Size (1K / 2K / 4K)", style = MaterialTheme.typography.labelLarge, color = glass.primaryText)
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    AiImageSizeOption.entries.forEach { sizeOpt ->
+                        GlassPill(
+                            onClick = { viewModel.setSelectedAiSize(sizeOpt) },
+                            isSelected = selectedSize == sizeOpt,
+                            modifier = Modifier
+                                .weight(1f)
+                                .testTag("ai_size_${sizeOpt.label}")
+                        ) {
                             Text(
-                                text = modelOpt.displayName,
+                                text = "${sizeOpt.label} (${sizeOpt.pixelDimension}px)",
+                                fontFamily = JetBrainsTabularFamily,
                                 style = MaterialTheme.typography.labelLarge,
                                 color = glass.primaryText
-                            )
-                            Text(
-                                text = modelOpt.subtitle,
-                                style = MaterialTheme.typography.labelSmall,
-                                color = glass.secondaryText,
-                                maxLines = 1
                             )
                         }
                     }
                 }
-            }
 
-            // Image Resolution Selector: 1K, 2K, 4K
-            Text("2. Output Image Size (1K / 2K / 4K)", style = MaterialTheme.typography.labelLarge, color = glass.primaryText)
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                AiImageSizeOption.entries.forEach { sizeOpt ->
+                // Aspect Ratio Selector: 1:1, 2:3, 3:2, 3:4, 4:3, 9:16, 16:9, 21:9
+                Text("3. Aspect Ratio", style = MaterialTheme.typography.labelLarge, color = glass.primaryText)
+                FlowRow(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    AiAspectRatioOption.entries.forEach { ratioOpt ->
+                        GlassPill(
+                            onClick = { viewModel.setSelectedAiAspectRatio(ratioOpt) },
+                            isSelected = selectedRatio == ratioOpt,
+                            contentPaddingHorizontal = 12.dp,
+                            contentPaddingVertical = 7.dp,
+                            modifier = Modifier.testTag("ai_aspect_${ratioOpt.label}")
+                        ) {
+                            Text(
+                                text = ratioOpt.label,
+                                fontFamily = JetBrainsTabularFamily,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = glass.primaryText
+                            )
+                        }
+                    }
+                }
+
+                // Prompt Input
+                OutlinedTextField(
+                    value = prompt,
+                    onValueChange = { viewModel.setAiPrompt(it) },
+                    label = { Text("Describe custom stamp, architectural diagram, or cover art") },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("ai_studio_prompt_input"),
+                    maxLines = 3
+                )
+
+                // Dual Synthesis Buttons: AI Smart Vector Stamp + AI Raster Image
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
                     GlassPill(
-                        onClick = { viewModel.setSelectedAiSize(sizeOpt) },
-                        isSelected = selectedSize == sizeOpt,
+                        onClick = { viewModel.generateAiSmartVectorStamp() },
+                        isSelected = true,
                         modifier = Modifier
                             .weight(1f)
-                            .testTag("ai_size_${sizeOpt.label}")
+                            .testTag("ai_smart_stamp_generate_button")
                     ) {
+                        Icon(Icons.Default.Verified, null, tint = glass.goldBadge, modifier = Modifier.size(16.dp))
+                        Spacer(Modifier.width(6.dp))
                         Text(
-                            text = "${sizeOpt.label} (${sizeOpt.pixelDimension}px)",
-                            fontFamily = JetBrainsTabularFamily,
+                            text = "AI Smart Stamp",
                             style = MaterialTheme.typography.labelLarge,
                             color = glass.primaryText
                         )
                     }
-                }
-            }
 
-            // Aspect Ratio Selector: 1:1, 2:3, 3:2, 3:4, 4:3, 9:16, 16:9, 21:9
-            Text("3. Aspect Ratio", style = MaterialTheme.typography.labelLarge, color = glass.primaryText)
-            FlowRow(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                AiAspectRatioOption.entries.forEach { ratioOpt ->
                     GlassPill(
-                        onClick = { viewModel.setSelectedAiAspectRatio(ratioOpt) },
-                        isSelected = selectedRatio == ratioOpt,
-                        contentPaddingHorizontal = 12.dp,
-                        contentPaddingVertical = 7.dp,
-                        modifier = Modifier.testTag("ai_aspect_${ratioOpt.label}")
+                        onClick = { viewModel.generateAiStudioImage() },
+                        isSelected = true,
+                        modifier = Modifier
+                            .weight(1f)
+                            .testTag("ai_studio_generate_button")
                     ) {
+                        Icon(Icons.Default.AutoAwesome, null, tint = glass.goldBadge, modifier = Modifier.size(16.dp))
+                        Spacer(Modifier.width(6.dp))
                         Text(
-                            text = ratioOpt.label,
-                            fontFamily = JetBrainsTabularFamily,
-                            style = MaterialTheme.typography.labelSmall,
+                            text = "AI Image (${selectedSize.label})",
+                            style = MaterialTheme.typography.labelLarge,
                             color = glass.primaryText
                         )
                     }
-                }
-            }
-
-            // Prompt Input
-            OutlinedTextField(
-                value = prompt,
-                onValueChange = { viewModel.setAiPrompt(it) },
-                label = { Text("Describe custom stamp, architectural diagram, or cover art") },
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .testTag("ai_studio_prompt_input"),
-                maxLines = 3
-            )
-
-            // Dual Synthesis Buttons: AI Smart Vector Stamp + AI Raster Image
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                GlassPill(
-                    onClick = { viewModel.generateAiSmartVectorStamp() },
-                    isSelected = true,
-                    modifier = Modifier
-                        .weight(1f)
-                        .testTag("ai_smart_stamp_generate_button")
-                ) {
-                    Icon(Icons.Default.Verified, null, tint = glass.goldBadge, modifier = Modifier.size(16.dp))
-                    Spacer(Modifier.width(6.dp))
-                    Text(
-                        text = "AI Smart Stamp",
-                        style = MaterialTheme.typography.labelLarge,
-                        color = glass.primaryText
-                    )
-                }
-
-                GlassPill(
-                    onClick = { viewModel.generateAiStudioImage() },
-                    isSelected = true,
-                    modifier = Modifier
-                        .weight(1f)
-                        .testTag("ai_studio_generate_button")
-                ) {
-                    Icon(Icons.Default.AutoAwesome, null, tint = glass.goldBadge, modifier = Modifier.size(16.dp))
-                    Spacer(Modifier.width(6.dp))
-                    Text(
-                        text = "AI Image (${selectedSize.label})",
-                        style = MaterialTheme.typography.labelLarge,
-                        color = glass.primaryText
-                    )
                 }
             }
 
@@ -1443,20 +1665,35 @@ fun ProToolboxAndExportModals(
                 }
 
                 ProToolWorkflow.OCR_SCANNER -> {
+                    val isKeyConfigured by viewModel.isGeminiApiKeyConfigured.collectAsStateWithLifecycle()
+                    val maskedKey by viewModel.maskedGeminiApiKey.collectAsStateWithLifecycle()
+                    val verifyState by viewModel.apiKeyVerificationState.collectAsStateWithLifecycle()
+
                     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                         Text(
-                            text = "Scans ${targetDoc.title} with Gemini 3.8 Flash Multimodal Vision to extract selectable text and executive summaries.",
+                            text = "Scans ${targetDoc.title} with Gemini Multimodal Vision to extract selectable text and executive summaries.",
                             style = MaterialTheme.typography.bodyMedium,
                             color = glass.secondaryText
                         )
-                        GlassPill(
-                            onClick = { viewModel.executeVisionOcrScan(targetDoc, 0) },
-                            isSelected = true,
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .testTag("confirm_ocr_scan_button")
-                        ) {
-                            Text("Run AI Vision OCR on Page 1", style = MaterialTheme.typography.titleMedium, color = glass.primaryText)
+                        if (!isKeyConfigured) {
+                            GeminiApiKeyActivationCard(
+                                isConfigured = false,
+                                maskedKey = maskedKey,
+                                verificationState = verifyState,
+                                onVerifyAndActivate = { viewModel.saveAndVerifyGeminiApiKey(it) },
+                                onRemoveKey = { viewModel.clearGeminiApiKey() },
+                                title = "Activate Gemini API for Vision OCR"
+                            )
+                        } else {
+                            GlassPill(
+                                onClick = { viewModel.executeVisionOcrScan(targetDoc, 0) },
+                                isSelected = true,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .testTag("confirm_ocr_scan_button")
+                            ) {
+                                Text("Run AI Vision OCR on Page 1", style = MaterialTheme.typography.titleMedium, color = glass.primaryText)
+                            }
                         }
 
                         when (val st = ocrUiState) {
