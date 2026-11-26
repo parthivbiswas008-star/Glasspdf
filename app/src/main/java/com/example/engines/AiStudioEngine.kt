@@ -116,8 +116,9 @@ object AiStudioEngine {
 
     /**
      * Generates a real raster AI image using the user's Google Gemini API key.
-     * Supports Gemini native image generation (`gemini-2.0-flash-exp-image-generation` /
-     * `gemini-2.5-flash-image-preview`) and Imagen 3 (`imagen-3.0-generate-002:predict`) with automatic fallback.
+     * Supports Gemini 2.5/3 native image generation (`gemini-2.5-flash-image`,
+     * `gemini-3-pro-image-preview`, `gemini-3.1-flash-image-preview`), Imagen 4 (`:predict`),
+     * and dynamic `/v1beta/models` auto-discovery so image generation stays working across model updates.
      */
     suspend fun generateStudioImage(
         apiKey: String,
@@ -132,45 +133,92 @@ object AiStudioEngine {
         }
         try {
             val enrichedPrompt = buildString {
+                append("Generate a single crisp high-resolution image: ")
                 append(prompt.trim())
-                append(". Aspect ratio: ${aspectRatioOption.label}, crisp high-resolution editorial visual (${sizeOption.label}).")
+                append(". Aspect ratio ${aspectRatioOption.label}, clean editorial quality (${sizeOption.label}).")
             }
 
-            val rawBitmap = withTimeout(60_000L) {
-                if (modelOption == AiImageModelOption.GEMINI_3_PRO_IMAGE) {
-                    callImagenPredict(cleanKey, modelOption.modelId, enrichedPrompt, aspectRatioOption)
-                        .recoverCatching {
-                            callGeminiNativeImageGen(cleanKey, "gemini-2.0-flash-exp-image-generation", enrichedPrompt)
-                                .getOrThrow()
-                        }
-                        .getOrThrow()
-                } else {
-                    val primaryModels = listOf(
-                        modelOption.modelId,
-                        "gemini-2.0-flash-exp-image-generation",
-                        "gemini-2.5-flash-image-preview"
-                    ).distinct()
+            val rawBitmap = withTimeout(75_000L) {
+                // 1. Ordered active Gemini native image models (generateContent with responseModalities = IMAGE + TEXT)
+                val staticNativeModels = listOf(
+                    modelOption.modelId,
+                    "gemini-2.5-flash-image",
+                    "gemini-3.1-flash-image-preview",
+                    "gemini-3-pro-image-preview",
+                    "gemini-2.5-flash-image-preview",
+                    "gemini-2.0-flash-preview-image-generation",
+                    "gemini-2.0-flash-exp-image-generation"
+                ).distinct()
 
-                    var generated: Bitmap? = null
-                    var lastError: Throwable? = null
-                    for (m in primaryModels) {
-                        val res = callGeminiNativeImageGen(cleanKey, m, enrichedPrompt)
+                var generated: Bitmap? = null
+                var lastError: Throwable? = null
+                val triedModels = mutableSetOf<String>()
+
+                for (m in staticNativeModels) {
+                    triedModels.add(m)
+                    val res = callGeminiNativeImageGen(cleanKey, m, enrichedPrompt, aspectRatioOption)
+                    if (res.isSuccess) {
+                        generated = res.getOrNull()
+                        break
+                    } else {
+                        val err = res.exceptionOrNull()
+                        lastError = err
+                        val msg = err?.message.orEmpty()
+                        if (msg.contains("API key", ignoreCase = true) ||
+                            msg.contains("HTTP 401") ||
+                            msg.contains("HTTP 403")
+                        ) {
+                            throw (err ?: Exception(msg))
+                        }
+                    }
+                }
+
+                // 2. Fallback to Imagen 4 & Imagen 3 predict endpoints if native Gemini models returned 404/unavailable
+                if (generated == null) {
+                    val imagenModels = listOf(
+                        "imagen-4.0-generate-001",
+                        "imagen-4.0-fast-generate-001",
+                        "imagen-3.0-generate-002"
+                    )
+                    for (im in imagenModels) {
+                        triedModels.add(im)
+                        val res = callImagenPredict(cleanKey, im, enrichedPrompt, aspectRatioOption)
                         if (res.isSuccess) {
                             generated = res.getOrNull()
                             break
                         } else {
-                            lastError = res.exceptionOrNull()
+                            lastError = res.exceptionOrNull() ?: lastError
                         }
                     }
-                    generated ?: callImagenPredict(cleanKey, "imagen-3.0-generate-002", enrichedPrompt, aspectRatioOption)
-                        .getOrElse { throw (lastError ?: it) }
                 }
+
+                // 3. Dynamic model discovery via GET /v1beta/models for the user's exact API key!
+                if (generated == null) {
+                    val discovered = discoverAvailableImageModels(cleanKey)
+                    for ((modelId, supportsPredict) in discovered) {
+                        if (modelId in triedModels) continue
+                        triedModels.add(modelId)
+                        val res = if (supportsPredict && modelId.contains("imagen", ignoreCase = true)) {
+                            callImagenPredict(cleanKey, modelId, enrichedPrompt, aspectRatioOption)
+                        } else {
+                            callGeminiNativeImageGen(cleanKey, modelId, enrichedPrompt, aspectRatioOption)
+                        }
+                        if (res.isSuccess) {
+                            generated = res.getOrNull()
+                            break
+                        } else {
+                            lastError = res.exceptionOrNull() ?: lastError
+                        }
+                    }
+                }
+
+                generated ?: throw buildHelpfulImageError(lastError)
             }
 
             val formatted = conformBitmapToAspectAndSize(rawBitmap, aspectRatioOption)
             Result.success(formatted)
         } catch (e: TimeoutCancellationException) {
-            Result.failure(Exception("AI Image generation timed out after 60 seconds. Please try again."))
+            Result.failure(Exception("AI Image generation timed out. Please try again."))
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
@@ -179,37 +227,95 @@ object AiStudioEngine {
         }
     }
 
+    private fun buildHelpfulImageError(lastError: Throwable?): Exception {
+        val msg = lastError?.message.orEmpty()
+        return when {
+            msg.contains("429") || msg.contains("quota", ignoreCase = true) || msg.contains("billing", ignoreCase = true) ->
+                Exception("Your Gemini API key has reached its image-generation quota (HTTP 429). Enable billing in Google AI Studio for raster images, or use AI Smart Stamp.")
+            msg.isNotBlank() -> Exception(msg)
+            else -> Exception("No image generation model succeeded for this API key. Verify billing/access in Google AI Studio.")
+        }
+    }
+
+    private fun discoverAvailableImageModels(apiKey: String): List<Pair<String, Boolean>> {
+        val request = Request.Builder()
+            .url("$GEMINI_BASE_URL/models?pageSize=100")
+            .addHeader("x-goog-api-key", apiKey)
+            .get()
+            .build()
+        return try {
+            httpClient.newCall(request).execute().use { response ->
+                if (!response.isSuccessful) return emptyList()
+                val rawBody = response.body?.string().orEmpty()
+                val modelsArr = JSONObject(rawBody).optJSONArray("models") ?: return emptyList()
+                val candidates = mutableListOf<Pair<String, Boolean>>()
+                for (i in 0 until modelsArr.length()) {
+                    val m = modelsArr.optJSONObject(i) ?: continue
+                    val fullName = m.optString("name", "")
+                    val shortId = fullName.removePrefix("models/")
+                    if (shortId.isBlank()) continue
+                    val lower = shortId.lowercase()
+                    if (!lower.contains("image") && !lower.contains("imagen")) continue
+                    val methods = m.optJSONArray("supportedGenerationMethods") ?: JSONArray()
+                    val methodList = (0 until methods.length()).map { methods.optString(it) }
+                    val supportsGenerate = methodList.any { it.equals("generateContent", ignoreCase = true) }
+                    val supportsPredict = methodList.any { it.equals("predict", ignoreCase = true) }
+                    if (supportsGenerate || supportsPredict) {
+                        candidates.add(shortId to supportsPredict)
+                    }
+                }
+                // Prefer native Gemini image models before Imagen predict models
+                candidates.sortedBy { if (it.first.startsWith("gemini")) 0 else 1 }
+            }
+        } catch (_: Exception) {
+            emptyList()
+        }
+    }
+
     private fun callGeminiNativeImageGen(
         apiKey: String,
         modelId: String,
-        prompt: String
+        prompt: String,
+        aspectRatioOption: AiAspectRatioOption
     ): Result<Bitmap> {
-        val payload = JSONObject().apply {
-            put(
-                "contents",
-                JSONArray().put(
-                    JSONObject().put(
-                        "parts",
-                        JSONArray().put(JSONObject().put("text", prompt))
-                    )
-                )
-            )
-            put(
-                "generationConfig",
-                JSONObject().apply {
-                    put("responseModalities", JSONArray().put("TEXT").put("IMAGE"))
-                }
-            )
-        }
-        val resp = postGeminiJson(
+        val withImageConfig = buildGeminiImagePayload(
+            prompt = prompt,
+            includeImageConfig = true,
+            aspectRatioLabel = aspectRatioOption.label
+        )
+        val firstResp = postGeminiJson(
             url = "$GEMINI_BASE_URL/models/$modelId:generateContent",
             apiKey = apiKey,
-            body = payload
+            body = withImageConfig
         )
-        if (resp.isFailure) {
-            return Result.failure(resp.exceptionOrNull() ?: Exception("Image model request failed."))
+        val finalResp = if (firstResp.isFailure) {
+            val errMsg = firstResp.exceptionOrNull()?.message.orEmpty()
+            // Retry without imageConfig if the model doesn't support the imageConfig field
+            if (errMsg.contains("400") || errMsg.contains("imageConfig", ignoreCase = true) ||
+                errMsg.contains("Invalid", ignoreCase = true)
+            ) {
+                val simplePayload = buildGeminiImagePayload(
+                    prompt = prompt,
+                    includeImageConfig = false,
+                    aspectRatioLabel = aspectRatioOption.label
+                )
+                postGeminiJson(
+                    url = "$GEMINI_BASE_URL/models/$modelId:generateContent",
+                    apiKey = apiKey,
+                    body = simplePayload
+                )
+            } else {
+                firstResp
+            }
+        } else {
+            firstResp
         }
-        val root = resp.getOrThrow()
+
+        if (finalResp.isFailure) {
+            return Result.failure(finalResp.exceptionOrNull() ?: Exception("Image model request failed ($modelId)."))
+        }
+
+        val root = finalResp.getOrThrow()
         val candidates = root.optJSONArray("candidates") ?: JSONArray()
         for (cIdx in 0 until candidates.length()) {
             val content = candidates.optJSONObject(cIdx)?.optJSONObject("content") ?: continue
@@ -226,6 +332,36 @@ object AiStudioEngine {
             }
         }
         return Result.failure(IllegalStateException("No image payload returned by $modelId."))
+    }
+
+    private fun buildGeminiImagePayload(
+        prompt: String,
+        includeImageConfig: Boolean,
+        aspectRatioLabel: String
+    ): JSONObject {
+        return JSONObject().apply {
+            put(
+                "contents",
+                JSONArray().put(
+                    JSONObject().put(
+                        "parts",
+                        JSONArray().put(JSONObject().put("text", prompt))
+                    )
+                )
+            )
+            put(
+                "generationConfig",
+                JSONObject().apply {
+                    put("responseModalities", JSONArray().put("IMAGE").put("TEXT"))
+                    if (includeImageConfig) {
+                        put(
+                            "imageConfig",
+                            JSONObject().put("aspectRatio", aspectRatioLabel)
+                        )
+                    }
+                }
+            )
+        }
     }
 
     private fun callImagenPredict(
@@ -257,7 +393,7 @@ object AiStudioEngine {
             body = payload
         )
         if (resp.isFailure) {
-            return Result.failure(resp.exceptionOrNull() ?: Exception("Imagen generation failed."))
+            return Result.failure(resp.exceptionOrNull() ?: Exception("Imagen generation failed ($modelId)."))
         }
         val root = resp.getOrThrow()
         val predictions = root.optJSONArray("predictions") ?: JSONArray()
@@ -269,7 +405,7 @@ object AiStudioEngine {
                 if (bmp != null) return Result.success(bmp)
             }
         }
-        return Result.failure(IllegalStateException("No image returned by Imagen 3."))
+        return Result.failure(IllegalStateException("No image returned by $modelId."))
     }
 
     /**

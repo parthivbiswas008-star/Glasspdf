@@ -229,7 +229,7 @@ class PdfWorkspaceViewModel(application: Application) : AndroidViewModel(applica
     private val _activeColorHex = MutableStateFlow(EditorialHighlightSwatches.first().hex)
     val activeColorHex: StateFlow<String> = _activeColorHex.asStateFlow()
 
-    private val _activeStrokeWidth = MutableStateFlow(3.5f)
+    private val _activeStrokeWidth = MutableStateFlow(_appSettings.value.defaultStrokeWidth)
     val activeStrokeWidth: StateFlow<Float> = _activeStrokeWidth.asStateFlow()
 
     private val _activeOpacity = MutableStateFlow(_appSettings.value.defaultHighlightOpacity)
@@ -1026,13 +1026,42 @@ class PdfWorkspaceViewModel(application: Application) : AndroidViewModel(applica
     }
 
     fun setActiveStrokeWidth(width: Float) {
-        _activeStrokeWidth.value = width.coerceIn(1f, 16f)
+        val clamped = width.coerceIn(1.5f, 14f)
+        _activeStrokeWidth.value = clamped
+        updateSettings { it.copy(defaultStrokeWidth = clamped) }
+        val existing = _selectedExistingMarkup.value
+        if (existing != null) {
+            val newScale = TextMarkupEngine.computeHighlightThicknessScale(clamped)
+            val updated = existing.copy(thicknessScale = newScale)
+            updateExistingMarkupInPlace(updated)
+        }
     }
 
     fun setActiveOpacity(opacity: Float) {
-        val clamped = opacity.coerceIn(0.15f, 1.0f)
+        val clamped = opacity.coerceIn(0.15f, 0.95f)
         _activeOpacity.value = clamped
         updateSettings { it.copy(defaultHighlightOpacity = clamped) }
+        val existing = _selectedExistingMarkup.value
+        if (existing != null) {
+            val updated = existing.copy(opacity = clamped)
+            updateExistingMarkupInPlace(updated)
+        }
+    }
+
+    fun setAutoFitHighlighterToLine(enabled: Boolean) {
+        updateSettings { it.copy(autoFitHighlighterToLine = enabled) }
+        showDynamicToast(
+            if (enabled) "Auto-Fit Line Width ON" else "Fixed Highlighter Width",
+            if (enabled) "Matches line height" else "Uniform band"
+        )
+    }
+
+    private fun updateExistingMarkupInPlace(updated: TextMarkupAnnotation) {
+        val current = _activeSnapshot.value
+        val newList = current.markups.map { if (it.id == updated.id) updated else it }
+        _activeSnapshot.value = current.copy(markups = newList)
+        _selectedExistingMarkup.value = updated
+        persistCurrentDocumentState()
     }
 
     fun setActiveFontFamilyId(fontId: String) {
@@ -1192,9 +1221,10 @@ class PdfWorkspaceViewModel(application: Application) : AndroidViewModel(applica
             pageIndex = pageIndex,
             style = style,
             colorHex = colorHex,
-            opacity = _activeOpacity.value.coerceIn(0.28f, 0.65f),
+            opacity = _activeOpacity.value.coerceIn(0.15f, 0.95f),
             rects = selection.mergedLineRects,
-            selectedText = selection.selectedText
+            selectedText = selection.selectedText,
+            thicknessScale = TextMarkupEngine.computeHighlightThicknessScale(_activeStrokeWidth.value)
         )
         val current = _activeSnapshot.value
         pushSnapshotMutation(current.copy(markups = current.markups + newMarkup))
@@ -1274,7 +1304,7 @@ class PdfWorkspaceViewModel(application: Application) : AndroidViewModel(applica
             points = points,
             colorHex = _activeColorHex.value,
             strokeWidth = _activeStrokeWidth.value,
-            opacity = if (isMarker) 0.38f else _activeOpacity.value.coerceAtLeast(0.75f),
+            opacity = _activeOpacity.value.coerceIn(0.15f, 0.95f),
             isHighlighter = isMarker
         )
         val current = _activeSnapshot.value
@@ -1315,7 +1345,7 @@ class PdfWorkspaceViewModel(application: Application) : AndroidViewModel(applica
             end = end,
             colorHex = if (kind == ShapeKind.REDACTION) "#000000" else _activeColorHex.value,
             strokeWidth = _activeStrokeWidth.value,
-            opacity = _activeOpacity.value.coerceAtLeast(0.8f)
+            opacity = if (kind == ShapeKind.REDACTION) 1.0f else _activeOpacity.value.coerceIn(0.15f, 0.95f)
         )
         val current = _activeSnapshot.value
         pushSnapshotMutation(current.copy(shapes = current.shapes + shape))

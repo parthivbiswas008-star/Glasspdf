@@ -24,6 +24,39 @@ object TextMarkupEngine {
     private const val PAGE_MIN_X = 0.02f
     private const val PAGE_MAX_X = 0.98f
 
+    /**
+     * Converts the user's Stroke/Width slider (`1.5..14.0 pt`, default `3.5 pt`)
+     * into a smooth highlighter band thickness multiplier (`0.55x..1.90x`), where
+     * `3.5 pt` maps cleanly to `1.0x` (exact auto-fit to the text line's height).
+     */
+    fun computeHighlightThicknessScale(strokeWidthPt: Float): Float {
+        val clamped = strokeWidthPt.coerceIn(1.5f, 14f)
+        return if (clamped <= 3.5f) {
+            // 1.5 -> 0.58x, 3.5 -> 1.00x
+            0.58f + ((clamped - 1.5f) / 2.0f) * 0.42f
+        } else {
+            // 3.5 -> 1.00x, 14.0 -> 1.90x
+            1.00f + ((clamped - 3.5f) / 10.5f) * 0.90f
+        }.coerceIn(0.55f, 1.95f)
+    }
+
+    /**
+     * Scales a highlight rect's vertical thickness smoothly around the line's vertical center.
+     * When `autoFitToLine` is true, each line's real measured height (`rect.height`) is preserved
+     * and scaled by `thicknessScale`. When false, a uniform standard band height is scaled instead.
+     */
+    fun scaleRectForThickness(
+        rect: NormalizedRect,
+        thicknessScale: Float,
+        autoFitToLine: Boolean = true
+    ): NormalizedRect {
+        val baseH = if (autoFitToLine) rect.height else DEFAULT_LINE_HEIGHT
+        val scaledH = (baseH * thicknessScale.coerceIn(0.50f, 2.0f)).coerceIn(0.009f, 0.14f)
+        val centerY = rect.y + rect.height * 0.5f
+        val newY = (centerY - scaledH * 0.5f).coerceIn(0f, (1f - scaledH).coerceAtLeast(0f))
+        return rect.copy(y = newY, height = scaledH)
+    }
+
     data class SelectionResult(
         val selectedWords: List<PdfTextWord>,
         val mergedLineRects: List<NormalizedRect>,
@@ -118,7 +151,7 @@ object TextMarkupEngine {
         val firstRect = current.mergedLineRects.first()
         val pinnedLeftX = firstRect.x.coerceIn(PAGE_MIN_X, PAGE_MAX_X - MIN_SPAN_WIDTH)
         val pinnedTopY = firstRect.y
-        val pinnedHeight = firstRect.height.coerceIn(0.014f, 0.055f)
+        val pinnedHeight = firstRect.height.coerceIn(0.011f, 0.080f)
         val pinnedBottomY = pinnedTopY + pinnedHeight
 
         val lines = extractVisualLines(pageWords)
@@ -164,7 +197,7 @@ object TextMarkupEngine {
         val lastRect = current.mergedLineRects.last()
         val pinnedRightX = lastRect.right.coerceIn(PAGE_MIN_X + MIN_SPAN_WIDTH, PAGE_MAX_X)
         val pinnedLastTopY = lastRect.y
-        val pinnedLastHeight = lastRect.height.coerceIn(0.014f, 0.055f)
+        val pinnedLastHeight = lastRect.height.coerceIn(0.011f, 0.080f)
 
         val lines = extractVisualLines(pageWords)
         val lineTolerance = pinnedLastHeight * 0.55f
@@ -505,7 +538,7 @@ object TextMarkupEngine {
             VisualLineBand(
                 lineIndex = lineIdx,
                 y = top,
-                height = (bottom - top).coerceIn(0.015f, 0.05f),
+                height = (bottom - top).coerceIn(0.011f, 0.075f),
                 leftX = left,
                 rightX = right,
                 words = valid.sortedBy { it.bounds.x }

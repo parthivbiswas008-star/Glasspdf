@@ -205,9 +205,11 @@ fun GlassPdfProApp(
                 activeStrokeWidth = activeStrokeWidth,
                 activeOpacity = activeOpacity,
                 activeFontId = activeFontId,
+                autoFitHighlighterToLine = appSettings.autoFitHighlighterToLine,
                 onSelectColor = { workspaceViewModel.setActiveColorHex(it) },
                 onStrokeWidthChange = { workspaceViewModel.setActiveStrokeWidth(it) },
                 onOpacityChange = { workspaceViewModel.setActiveOpacity(it) },
+                onToggleAutoFitLine = { workspaceViewModel.setAutoFitHighlighterToLine(it) },
                 onSelectFont = { workspaceViewModel.setActiveFontFamilyId(it) },
                 onDismiss = { workspaceViewModel.setPropertiesSheetVisible(false) }
             )

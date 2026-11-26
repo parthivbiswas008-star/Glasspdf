@@ -178,6 +178,7 @@ fun MobilePdfViewer(
     val activeEditSubTool by viewModel.activeEditSubTool.collectAsStateWithLifecycle()
     val activeColorHex by viewModel.activeColorHex.collectAsStateWithLifecycle()
     val activeStrokeWidth by viewModel.activeStrokeWidth.collectAsStateWithLifecycle()
+    val activeOpacity by viewModel.activeOpacity.collectAsStateWithLifecycle()
     val touchSelection by viewModel.currentTouchSelection.collectAsStateWithLifecycle()
     val selectedExistingMarkup by viewModel.selectedExistingMarkup.collectAsStateWithLifecycle()
     val isReflowMode by viewModel.isReflowMode.collectAsStateWithLifecycle()
@@ -284,9 +285,9 @@ fun MobilePdfViewer(
                         .testTag("viewer_pdf_pages_lazy_column"),
                     contentPadding = PaddingValues(
                         start = 12.dp,
-                        end = 22.dp,
-                        top = 84.dp,
-                        bottom = 112.dp
+                        end = if (isChromeless) 12.dp else 22.dp,
+                        top = if (isChromeless) 16.dp else 142.dp,
+                        bottom = 24.dp
                     ),
                     verticalArrangement = Arrangement.spacedBy(16.dp),
                     horizontalAlignment = Alignment.CenterHorizontally
@@ -302,6 +303,8 @@ fun MobilePdfViewer(
                             activeDrawTool = activeDrawTool,
                             activeColorHex = activeColorHex,
                             activeStrokeWidth = activeStrokeWidth,
+                            activeOpacity = activeOpacity,
+                            autoFitHighlighterToLine = appSettings.autoFitHighlighterToLine,
                             paperTint = appSettings.paperTint,
                             searchQuery = searchQuery,
                             touchSelection = if (pageIdx == currentPageIndex) touchSelection else null,
@@ -412,8 +415,8 @@ fun MobilePdfViewer(
                     contentPadding = PaddingValues(
                         start = 14.dp,
                         end = 14.dp,
-                        top = 84.dp,
-                        bottom = 112.dp
+                        top = if (isChromeless) 16.dp else 142.dp,
+                        bottom = 24.dp
                     ),
                     pageSpacing = 14.dp
                 ) { pageIdx ->
@@ -431,6 +434,8 @@ fun MobilePdfViewer(
                             activeDrawTool = activeDrawTool,
                             activeColorHex = activeColorHex,
                             activeStrokeWidth = activeStrokeWidth,
+                            activeOpacity = activeOpacity,
+                            autoFitHighlighterToLine = appSettings.autoFitHighlighterToLine,
                             paperTint = appSettings.paperTint,
                             searchQuery = searchQuery,
                             touchSelection = if (pageIdx == currentPageIndex) touchSelection else null,
@@ -529,8 +534,8 @@ fun MobilePdfViewer(
                 }
             }
 
-            // Right-Edge Fast-Scroll Scrubber with Live Frosted Page Bubble
-            if (appSettings.showFastScrollScrubber) {
+            // Right-Edge Fast-Scroll Scrubber with Live Frosted Page Bubble (auto-hides in fullscreen)
+            if (appSettings.showFastScrollScrubber && !isChromeless) {
                 FastScrollGlassScrubber(
                     currentPage = currentPageIndex,
                     totalPages = doc.pageCount,
@@ -553,7 +558,6 @@ fun MobilePdfViewer(
 
         // FLOATING LIQUID GLASS ACTION PILL FOR TEXT SELECTION OR EXISTING HIGHLIGHT
         if (!isReflowMode && (touchSelection != null || selectedExistingMarkup != null)) {
-            val flipBelow = touchSelection?.flipPillBelow ?: false
             TouchSelectionGlassPill(
                 selection = touchSelection,
                 existingMarkup = selectedExistingMarkup,
@@ -581,6 +585,9 @@ fun MobilePdfViewer(
                         viewModel.updateExistingMarkup(selectedExistingMarkup!!.copy(style = style))
                     }
                 },
+                onOpenStyleProperties = {
+                    viewModel.setPropertiesSheetVisible(true)
+                },
                 onExpandLine = { viewModel.expandCurrentSelectionToFullLine() },
                 onExpandParagraph = { viewModel.expandCurrentSelectionToParagraph() },
                 onCopyText = { viewModel.copySelectedTextToClipboard(context) },
@@ -606,6 +613,9 @@ fun MobilePdfViewer(
                 },
                 onAskAiAboutSelection = {
                     val selText = touchSelection?.selectedText ?: selectedExistingMarkup?.selectedText ?: ""
+                    if (isChromeless) {
+                        viewModel.toggleChromelessReading()
+                    }
                     activeBottomDrawer = ViewerSlideDrawer.AI_ASSISTANT
                     if (isGeminiApiKeyConfigured) {
                         val prompt = if (selText.isNotBlank()) {
@@ -624,13 +634,14 @@ fun MobilePdfViewer(
                     selectedExistingMarkup?.let { viewModel.deleteExistingMarkup(it.id) }
                 },
                 modifier = Modifier
-                    .align(if (flipBelow) Alignment.Center else Alignment.TopCenter)
-                    .windowInsetsPadding(WindowInsets.statusBars)
-                    .padding(top = if (flipBelow) 0.dp else 78.dp)
+                    .align(Alignment.BottomCenter)
+                    .windowInsetsPadding(WindowInsets.navigationBars)
+                    .padding(bottom = 16.dp)
             )
         }
 
-        // FLOATING TOP GLASS HEADER (Auto-hides on Chromeless Reading Tap)
+        // UNIFIED TOP FLOATING GLASS CHROME (Header + Minimalistic Annotate Bar + Slide-Down Drawers)
+        // Single tap on the PDF glides ALL annotate tools & chrome UPWARD off-screen for pure fullscreen!
         AnimatedVisibility(
             visible = !isChromeless && !isReflowMode,
             enter = fadeIn() + slideInVertically(initialOffsetY = { -it }),
@@ -642,7 +653,10 @@ fun MobilePdfViewer(
                 .windowInsetsPadding(WindowInsets.statusBars)
                 .padding(horizontal = 12.dp, vertical = 8.dp)
         ) {
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Column(
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
                 ViewerTopGlassHeader(
                     title = doc.title.removeSuffix(".pdf"),
                     isPasswordProtected = doc.isPasswordProtected,
@@ -683,6 +697,37 @@ fun MobilePdfViewer(
                     onPrint = { viewModel.printActiveDocument(context) }
                 )
 
+                // Compact Minimalistic 5-Button Annotate & Tools Bar (slides upward with header on 1 tap!)
+                CompactMinimalBottomBar(
+                    isHighlightActive = dockMode == ViewerDockMode.ANNOTATE,
+                    activeColorHex = activeColorHex,
+                    isToolsDrawerOpen = activeBottomDrawer == ViewerSlideDrawer.TOOLS,
+                    isAiDrawerOpen = activeBottomDrawer == ViewerSlideDrawer.AI_ASSISTANT,
+                    isAiActive = isGeminiApiKeyConfigured,
+                    isViewDrawerOpen = activeBottomDrawer == ViewerSlideDrawer.VIEW_DISPLAY,
+                    currentPage = currentPageIndex + 1,
+                    totalPages = doc.pageCount,
+                    onToggleHighlight = {
+                        activeBottomDrawer = null
+                        readModeStickyNoteActive = false
+                        val next = if (dockMode == ViewerDockMode.ANNOTATE) ViewerDockMode.READ else ViewerDockMode.ANNOTATE
+                        viewModel.setViewerDockMode(next)
+                    },
+                    onToggleToolsDrawer = {
+                        activeBottomDrawer = if (activeBottomDrawer == ViewerSlideDrawer.TOOLS) null else ViewerSlideDrawer.TOOLS
+                    },
+                    onToggleAiDrawer = {
+                        activeBottomDrawer = if (activeBottomDrawer == ViewerSlideDrawer.AI_ASSISTANT) null else ViewerSlideDrawer.AI_ASSISTANT
+                    },
+                    onOpenPagesNavigator = {
+                        activeBottomDrawer = null
+                        viewModel.setNavigatorSheetVisible(true)
+                    },
+                    onToggleViewDrawer = {
+                        activeBottomDrawer = if (activeBottomDrawer == ViewerSlideDrawer.VIEW_DISPLAY) null else ViewerSlideDrawer.VIEW_DISPLAY
+                    }
+                )
+
                 if (isSearchVisible) {
                     GlassSurface(
                         modifier = Modifier.fillMaxWidth(),
@@ -716,31 +761,70 @@ fun MobilePdfViewer(
                         }
                     }
                 }
-            }
-        }
 
-        // MINIMALISTIC COMPACT FLOATING BOTTOM BAR + ON-DEMAND SLIDE-OUT GLASS DRAWERS
-        // Keeps ~88% of the PDF reading viewport completely unobstructed!
-        AnimatedVisibility(
-            visible = !isChromeless && !isReflowMode,
-            enter = fadeIn() + slideInVertically(initialOffsetY = { it }),
-            exit = fadeOut() + slideOutVertically(targetOffsetY = { it }),
-            modifier = Modifier
-                .align(Alignment.BottomCenter)
-                .fillMaxWidth()
-                .widthIn(max = 580.dp)
-                .windowInsetsPadding(WindowInsets.navigationBars)
-                .padding(horizontal = 12.dp, vertical = 8.dp)
-        ) {
-            Column(
-                horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                // Slide-Out Drawers (only shown on demand when user taps Tools, AI, or View)
+                // Slim Active-Tool Chip (only shown when actively annotating/drawing/editing/sticky-noting)
+                val showActiveToolPill = activeBottomDrawer == null &&
+                    (dockMode != ViewerDockMode.READ || readModeStickyNoteActive)
+                if (showActiveToolPill) {
+                    val modeBadgeText = when {
+                        readModeStickyNoteActive -> "Sticky Note • Tap Page"
+                        dockMode == ViewerDockMode.ANNOTATE -> "Highlight • Hold text 2s"
+                        dockMode == ViewerDockMode.DRAW -> "Draw • ${activeDrawTool.label}"
+                        dockMode == ViewerDockMode.EDIT -> "Edit • ${activeEditSubTool.label}"
+                        dockMode == ViewerDockMode.SIGN -> "Fill & Sign"
+                        else -> dockMode.label
+                    }
+                    GlassSurface(
+                        shape = RoundedCornerShape(50),
+                        elevation = 12.dp,
+                        modifier = Modifier.testTag("viewer_active_tool_chip")
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(16.dp)
+                                    .clip(CircleShape)
+                                    .background(parseComposeHex(activeColorHex, Color(0xFFFFE600)))
+                                    .border(1.2.dp, Color.White, CircleShape)
+                                    .clickable { viewModel.setPropertiesSheetVisible(true) }
+                            )
+                            Text(
+                                text = modeBadgeText,
+                                style = MaterialTheme.typography.labelLarge,
+                                color = glass.primaryText
+                            )
+                            GlassPill(
+                                onClick = { viewModel.setPropertiesSheetVisible(true) },
+                                contentPaddingHorizontal = 8.dp,
+                                contentPaddingVertical = 4.dp,
+                                modifier = Modifier.testTag("viewer_quick_style_button")
+                            ) {
+                                Text("Style", style = MaterialTheme.typography.labelSmall, color = glass.primaryText)
+                            }
+                            GlassPill(
+                                onClick = {
+                                    readModeStickyNoteActive = false
+                                    viewModel.setViewerDockMode(ViewerDockMode.READ)
+                                },
+                                contentPaddingHorizontal = 10.dp,
+                                contentPaddingVertical = 4.dp,
+                                modifier = Modifier.testTag("viewer_exit_tool_mode_button")
+                            ) {
+                                Text("Done", style = MaterialTheme.typography.labelSmall, color = glass.accent)
+                            }
+                        }
+                    }
+                }
+
+                // Slide-Down Glass Drawers (unfold cleanly from top bar & slide upward on dismiss or 1-tap fullscreen)
                 AnimatedVisibility(
                     visible = activeBottomDrawer != null,
-                    enter = fadeIn() + slideInVertically(initialOffsetY = { it / 2 }),
-                    exit = fadeOut() + slideOutVertically(targetOffsetY = { it / 2 })
+                    enter = fadeIn() + slideInVertically(initialOffsetY = { -it / 2 }),
+                    exit = fadeOut() + slideOutVertically(targetOffsetY = { -it / 2 })
                 ) {
                     when (activeBottomDrawer) {
                         ViewerSlideDrawer.TOOLS -> {
@@ -892,87 +976,6 @@ fun MobilePdfViewer(
                         null -> {}
                     }
                 }
-
-                // Slim Active-Tool Chip (only shown when actively annotating/drawing/editing/sticky-noting)
-                val showActiveToolPill = activeBottomDrawer == null &&
-                    (dockMode != ViewerDockMode.READ || readModeStickyNoteActive)
-                if (showActiveToolPill) {
-                    val modeBadgeText = when {
-                        readModeStickyNoteActive -> "Sticky Note • Tap Page"
-                        dockMode == ViewerDockMode.ANNOTATE -> "Highlight (${activeMarkupStyle.label})"
-                        dockMode == ViewerDockMode.DRAW -> "Draw • ${activeDrawTool.label}"
-                        dockMode == ViewerDockMode.EDIT -> "Edit • ${activeEditSubTool.label}"
-                        dockMode == ViewerDockMode.SIGN -> "Fill & Sign"
-                        else -> dockMode.label
-                    }
-                    GlassSurface(
-                        shape = RoundedCornerShape(50),
-                        elevation = 12.dp,
-                        modifier = Modifier.testTag("viewer_active_tool_chip")
-                    ) {
-                        Row(
-                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(8.dp)
-                        ) {
-                            Box(
-                                modifier = Modifier
-                                    .size(14.dp)
-                                    .clip(CircleShape)
-                                    .background(parseComposeHex(activeColorHex, Color(0xFFFFF01F)))
-                                    .border(1.dp, Color.White, CircleShape)
-                                    .clickable { viewModel.setPropertiesSheetVisible(true) }
-                            )
-                            Text(
-                                text = modeBadgeText,
-                                style = MaterialTheme.typography.labelLarge,
-                                color = glass.primaryText
-                            )
-                            GlassPill(
-                                onClick = {
-                                    readModeStickyNoteActive = false
-                                    viewModel.setViewerDockMode(ViewerDockMode.READ)
-                                },
-                                contentPaddingHorizontal = 10.dp,
-                                contentPaddingVertical = 4.dp,
-                                modifier = Modifier.testTag("viewer_exit_tool_mode_button")
-                            ) {
-                                Text("Done", style = MaterialTheme.typography.labelSmall, color = glass.accent)
-                            }
-                        }
-                    }
-                }
-
-                // Single Minimalistic 5-Button Floating Bottom Bar
-                CompactMinimalBottomBar(
-                    isHighlightActive = dockMode == ViewerDockMode.ANNOTATE,
-                    activeColorHex = activeColorHex,
-                    isToolsDrawerOpen = activeBottomDrawer == ViewerSlideDrawer.TOOLS,
-                    isAiDrawerOpen = activeBottomDrawer == ViewerSlideDrawer.AI_ASSISTANT,
-                    isAiActive = isGeminiApiKeyConfigured,
-                    isViewDrawerOpen = activeBottomDrawer == ViewerSlideDrawer.VIEW_DISPLAY,
-                    currentPage = currentPageIndex + 1,
-                    totalPages = doc.pageCount,
-                    onToggleHighlight = {
-                        activeBottomDrawer = null
-                        readModeStickyNoteActive = false
-                        val next = if (dockMode == ViewerDockMode.ANNOTATE) ViewerDockMode.READ else ViewerDockMode.ANNOTATE
-                        viewModel.setViewerDockMode(next)
-                    },
-                    onToggleToolsDrawer = {
-                        activeBottomDrawer = if (activeBottomDrawer == ViewerSlideDrawer.TOOLS) null else ViewerSlideDrawer.TOOLS
-                    },
-                    onToggleAiDrawer = {
-                        activeBottomDrawer = if (activeBottomDrawer == ViewerSlideDrawer.AI_ASSISTANT) null else ViewerSlideDrawer.AI_ASSISTANT
-                    },
-                    onOpenPagesNavigator = {
-                        activeBottomDrawer = null
-                        viewModel.setNavigatorSheetVisible(true)
-                    },
-                    onToggleViewDrawer = {
-                        activeBottomDrawer = if (activeBottomDrawer == ViewerSlideDrawer.VIEW_DISPLAY) null else ViewerSlideDrawer.VIEW_DISPLAY
-                    }
-                )
             }
         }
     }

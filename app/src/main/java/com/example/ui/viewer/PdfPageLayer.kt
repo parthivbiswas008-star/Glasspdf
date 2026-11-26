@@ -7,8 +7,9 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectDragGestures
-import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -48,6 +49,7 @@ import androidx.compose.material.icons.filled.Highlight
 import androidx.compose.material.icons.filled.RadioButtonChecked
 import androidx.compose.material.icons.filled.RadioButtonUnchecked
 import androidx.compose.material.icons.filled.Remove
+import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.filled.Waves
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -55,6 +57,8 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -75,9 +79,11 @@ import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -102,11 +108,16 @@ import com.example.ui.theme.FluorescentHighlightSwatches
 import com.example.ui.theme.JetBrainsTabularFamily
 import com.example.ui.theme.LocalLiquidGlass
 import com.example.ui.theme.SignatureFontOptions
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import java.io.File
 import kotlin.math.atan2
 import kotlin.math.cos
 import kotlin.math.roundToInt
 import kotlin.math.sin
+
+private const val HOLD_TO_SELECT_MS = 2000L
 
 /**
  * 3-Layer Synchronized PDF Page Renderer:
@@ -128,6 +139,8 @@ fun PdfPageLayer(
     activeDrawTool: DrawToolType,
     activeColorHex: String,
     activeStrokeWidth: Float,
+    activeOpacity: Float = 0.62f,
+    autoFitHighlighterToLine: Boolean = true,
     paperTint: PdfCanvasPaperTint = PdfCanvasPaperTint.ORIGINAL,
     searchQuery: String,
     touchSelection: TextMarkupEngine.SelectionResult?,
@@ -152,9 +165,13 @@ fun PdfPageLayer(
     onDeletePlacedElement: (String) -> Unit,
     modifier: Modifier = Modifier
 ) {
+    val haptic = LocalHapticFeedback.current
     val liveInkPoints = remember { mutableStateListOf<NormalizedPoint>() }
     var dragStartNorm by remember { mutableStateOf<NormalizedPoint?>(null) }
     var dragCurrentNorm by remember { mutableStateOf<NormalizedPoint?>(null) }
+    var holdProgress by remember { mutableFloatStateOf(0f) }
+    var holdIndicatorOffset by remember { mutableStateOf<Offset?>(null) }
+    var lastHoldActivatedMs by remember { mutableLongStateOf(0L) }
 
     val pageMarkups = remember(snapshot.markups, pageIndex) {
         snapshot.markups.filter { it.pageIndex == pageIndex }
@@ -212,8 +229,8 @@ fun PdfPageLayer(
 
     val isDarkPaper = paperTint == PdfCanvasPaperTint.NIGHT_CONTRAST || paperTint == PdfCanvasPaperTint.AMOLED_DARK
     val safeAspectRatio = pageAspectRatio.coerceIn(0.45f, 2.2f)
-    val enableFullCanvasDragInterceptor = dockMode == ViewerDockMode.ANNOTATE || dockMode == ViewerDockMode.DRAW
-    val enableReadHorizontalSelectDrag = dockMode == ViewerDockMode.READ && !readModeStickyNoteActive
+    val enableDrawDragInterceptor = dockMode == ViewerDockMode.DRAW
+    val enableTwoSecondHoldSelect = (dockMode == ViewerDockMode.READ || dockMode == ViewerDockMode.ANNOTATE) && !readModeStickyNoteActive
 
     BoxWithConstraints(
         modifier = modifier
@@ -245,85 +262,115 @@ fun PdfPageLayer(
         }
 
         // LAYER 2: Gesture & Normalized Vector Canvas Overlay
+        // - Normal drag/swipe ALWAYS scrolls cleanly at 144Hz (never hijacked for highlighting!)
+        // - Single tap on neutral page space toggles fullscreen (slides all annotate tools UP!)
+        // - Holding finger still for >= 2.0 seconds activates Text Selection Highlight + Left/Right Handles!
         val gestureModifier = Modifier
             .fillMaxSize()
             .pointerInput(dockMode, readModeStickyNoteActive, activeDrawTool, pageIndex, pageMarkups) {
                 detectTapGestures(
                     onDoubleTap = { onDoubleTapZoom() },
-                    onLongPress = { offset ->
-                        val normPt = NormalizedPoint(
-                            x = (offset.x / size.width).coerceIn(0f, 1f),
-                            y = (offset.y / size.height).coerceIn(0f, 1f)
-                        )
-                        onSelectWordOrLineAtTap(normPt, true)
-                    },
                     onTap = { offset ->
+                        // Guard against phantom tap right after releasing a 2-second hold selection
+                        if (System.currentTimeMillis() - lastHoldActivatedMs < 400L) return@detectTapGestures
+
                         val normPt = NormalizedPoint(
                             x = (offset.x / size.width).coerceIn(0f, 1f),
                             y = (offset.y / size.height).coerceIn(0f, 1f)
                         )
                         // 1. Check if user tapped an existing highlight markup
                         val hitMarkup = pageMarkups.firstOrNull { m ->
-                            m.rects.any { r -> r.contains(normPt.x, normPt.y, padding = 0.014f) }
+                            m.rects.any { r -> r.contains(normPt.x, normPt.y, padding = 0.015f) }
                         }
                         if (hitMarkup != null) {
                             onSelectExistingMarkup(hitMarkup)
                         } else if (dockMode == ViewerDockMode.READ && readModeStickyNoteActive) {
                             onPlaceStickyNoteInReadMode(normPt)
-                        } else if (dockMode == ViewerDockMode.READ || dockMode == ViewerDockMode.ANNOTATE) {
-                            // In both READ and ANNOTATE modes, tapping a word selects it for highlighting & sticky notes!
-                            val selected = onSelectWordOrLineAtTap(normPt, false)
-                            if (selected) {
-                                if (dockMode == ViewerDockMode.ANNOTATE) {
-                                    onSelectionFingerLift()
-                                }
-                            } else {
-                                onTapNeutralSpace()
-                            }
                         } else if (dockMode == ViewerDockMode.EDIT || dockMode == ViewerDockMode.SIGN) {
                             onTapInEditOrSignMode(normPt)
                         } else {
+                            // Single tap anywhere else cleanly slides all annotate tools UP / toggles fullscreen!
                             onTapNeutralSpace()
                         }
                     }
                 )
             }
             .then(
-                if (enableReadHorizontalSelectDrag) {
-                    // In READ mode, horizontal drag across text selects & highlights lines without blocking vertical scroll!
-                    Modifier.pointerInput(pageIndex) {
-                        detectHorizontalDragGestures(
-                            onDragStart = { startOffset ->
-                                val startNorm = NormalizedPoint(
-                                    x = (startOffset.x / size.width).coerceIn(0f, 1f),
-                                    y = (startOffset.y / size.height).coerceIn(0f, 1f)
+                if (enableTwoSecondHoldSelect) {
+                    // 2-Second Hold Gesture Detector: zero interference with scrolling!
+                    Modifier.pointerInput(pageIndex, dockMode) {
+                        coroutineScope {
+                            awaitEachGesture {
+                                val down = awaitFirstDown(requireUnconsumed = false)
+                                val downPos = down.position
+                                val downNorm = NormalizedPoint(
+                                    x = (downPos.x / size.width).coerceIn(0f, 1f),
+                                    y = (downPos.y / size.height).coerceIn(0f, 1f)
                                 )
-                                dragStartNorm = startNorm
-                                dragCurrentNorm = startNorm
-                                onUpdateTouchSelection(startNorm, startNorm)
-                            },
-                            onHorizontalDrag = { change, _ ->
-                                change.consume()
-                                val currNorm = NormalizedPoint(
-                                    x = (change.position.x / size.width).coerceIn(0f, 1f),
-                                    y = (change.position.y / size.height).coerceIn(0f, 1f)
-                                )
-                                dragCurrentNorm = currNorm
-                                val startNorm = dragStartNorm ?: currNorm
-                                onUpdateTouchSelection(startNorm, currNorm)
-                            },
-                            onDragEnd = {
-                                onSelectionFingerLift()
-                                dragStartNorm = null
-                                dragCurrentNorm = null
-                            },
-                            onDragCancel = {
-                                dragStartNorm = null
-                                dragCurrentNorm = null
+                                val downTime = System.currentTimeMillis()
+                                val slopPx = (viewConfiguration.touchSlop * 1.45f).coerceAtLeast(24f)
+                                var holdActivated = false
+                                var holdCancelled = false
+
+                                val timerJob = launch {
+                                    while (!holdCancelled && !holdActivated) {
+                                        val elapsed = System.currentTimeMillis() - downTime
+                                        if (elapsed >= HOLD_TO_SELECT_MS) {
+                                            holdActivated = true
+                                            lastHoldActivatedMs = System.currentTimeMillis()
+                                            holdProgress = 0f
+                                            holdIndicatorOffset = null
+                                            haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                                            onSelectWordOrLineAtTap(downNorm, false)
+                                            break
+                                        } else if (elapsed >= 260L) {
+                                            holdIndicatorOffset = downPos
+                                            holdProgress = ((elapsed - 260L).toFloat() / (HOLD_TO_SELECT_MS - 260L).toFloat())
+                                                .coerceIn(0f, 1f)
+                                        }
+                                        delay(32L)
+                                    }
+                                }
+
+                                try {
+                                    while (true) {
+                                        val event = awaitPointerEvent()
+                                        val change = event.changes.firstOrNull { it.id == down.id }
+                                        if (change == null || !change.pressed) {
+                                            if (holdActivated) {
+                                                change?.consume()
+                                                onSelectionFingerLift()
+                                            }
+                                            break
+                                        }
+                                        if (!holdActivated) {
+                                            // If finger moves past touch slop (user is scrolling!), immediately cancel hold
+                                            // without consuming the event so LazyColumn/HorizontalPager scrolls smoothly!
+                                            val dist = (change.position - downPos).getDistance()
+                                            if (dist > slopPx || event.changes.size > 1) {
+                                                holdCancelled = true
+                                                break
+                                            }
+                                        } else {
+                                            // Hold >= 2s activated! Sweeping finger now live-selects text smoothly
+                                            change.consume()
+                                            val currNorm = NormalizedPoint(
+                                                x = (change.position.x / size.width).coerceIn(0f, 1f),
+                                                y = (change.position.y / size.height).coerceIn(0f, 1f)
+                                            )
+                                            onUpdateTouchSelection(downNorm, currNorm)
+                                        }
+                                    }
+                                } finally {
+                                    holdCancelled = true
+                                    timerJob.cancel()
+                                    holdProgress = 0f
+                                    holdIndicatorOffset = null
+                                }
                             }
-                        )
+                        }
                     }
-                } else if (enableFullCanvasDragInterceptor) {
+                } else if (enableDrawDragInterceptor) {
                     Modifier.pointerInput(dockMode, activeDrawTool, pageIndex) {
                         detectDragGestures(
                             onDragStart = { startOffset ->
@@ -333,19 +380,11 @@ fun PdfPageLayer(
                                 )
                                 dragStartNorm = startNorm
                                 dragCurrentNorm = startNorm
-                                when (dockMode) {
-                                    ViewerDockMode.ANNOTATE -> {
-                                        onUpdateTouchSelection(startNorm, startNorm)
-                                    }
-                                    ViewerDockMode.DRAW -> {
-                                        if (activeDrawTool == DrawToolType.INK_PEN || activeDrawTool == DrawToolType.MARKER) {
-                                            liveInkPoints.clear()
-                                            liveInkPoints.add(startNorm)
-                                        } else if (activeDrawTool == DrawToolType.ERASER) {
-                                            onEraseAtPoint(startNorm)
-                                        }
-                                    }
-                                    else -> {}
+                                if (activeDrawTool == DrawToolType.INK_PEN || activeDrawTool == DrawToolType.MARKER) {
+                                    liveInkPoints.clear()
+                                    liveInkPoints.add(startNorm)
+                                } else if (activeDrawTool == DrawToolType.ERASER) {
+                                    onEraseAtPoint(startNorm)
                                 }
                             },
                             onDrag = { change, _ ->
@@ -355,22 +394,12 @@ fun PdfPageLayer(
                                     y = (change.position.y / size.height).coerceIn(0f, 1f)
                                 )
                                 dragCurrentNorm = currNorm
-                                val startNorm = dragStartNorm ?: currNorm
-
-                                when (dockMode) {
-                                    ViewerDockMode.ANNOTATE -> {
-                                        onUpdateTouchSelection(startNorm, currNorm)
+                                when (activeDrawTool) {
+                                    DrawToolType.INK_PEN, DrawToolType.MARKER -> {
+                                        liveInkPoints.add(currNorm)
                                     }
-                                    ViewerDockMode.DRAW -> {
-                                        when (activeDrawTool) {
-                                            DrawToolType.INK_PEN, DrawToolType.MARKER -> {
-                                                liveInkPoints.add(currNorm)
-                                            }
-                                            DrawToolType.ERASER -> {
-                                                onEraseAtPoint(currNorm)
-                                            }
-                                            else -> {}
-                                        }
+                                    DrawToolType.ERASER -> {
+                                        onEraseAtPoint(currNorm)
                                     }
                                     else -> {}
                                 }
@@ -378,37 +407,29 @@ fun PdfPageLayer(
                             onDragEnd = {
                                 val startNorm = dragStartNorm
                                 val endNorm = dragCurrentNorm
-                                when (dockMode) {
-                                    ViewerDockMode.ANNOTATE -> {
-                                        onSelectionFingerLift()
-                                    }
-                                    ViewerDockMode.DRAW -> {
-                                        when (activeDrawTool) {
-                                            DrawToolType.INK_PEN, DrawToolType.MARKER -> {
-                                                if (liveInkPoints.size > 1) {
-                                                    onCommitInkStroke(liveInkPoints.toList())
-                                                }
-                                                liveInkPoints.clear()
-                                            }
-                                            DrawToolType.RECTANGLE -> if (startNorm != null && endNorm != null) {
-                                                onCommitShape(ShapeKind.RECTANGLE, startNorm, endNorm)
-                                            }
-                                            DrawToolType.CIRCLE -> if (startNorm != null && endNorm != null) {
-                                                onCommitShape(ShapeKind.CIRCLE, startNorm, endNorm)
-                                            }
-                                            DrawToolType.ARROW -> if (startNorm != null && endNorm != null) {
-                                                onCommitShape(ShapeKind.ARROW, startNorm, endNorm)
-                                            }
-                                            DrawToolType.LINE -> if (startNorm != null && endNorm != null) {
-                                                onCommitShape(ShapeKind.LINE, startNorm, endNorm)
-                                            }
-                                            DrawToolType.REDACTION -> if (startNorm != null && endNorm != null) {
-                                                onCommitShape(ShapeKind.REDACTION, startNorm, endNorm)
-                                            }
-                                            DrawToolType.ERASER -> {}
+                                when (activeDrawTool) {
+                                    DrawToolType.INK_PEN, DrawToolType.MARKER -> {
+                                        if (liveInkPoints.size > 1) {
+                                            onCommitInkStroke(liveInkPoints.toList())
                                         }
+                                        liveInkPoints.clear()
                                     }
-                                    else -> {}
+                                    DrawToolType.RECTANGLE -> if (startNorm != null && endNorm != null) {
+                                        onCommitShape(ShapeKind.RECTANGLE, startNorm, endNorm)
+                                    }
+                                    DrawToolType.CIRCLE -> if (startNorm != null && endNorm != null) {
+                                        onCommitShape(ShapeKind.CIRCLE, startNorm, endNorm)
+                                    }
+                                    DrawToolType.ARROW -> if (startNorm != null && endNorm != null) {
+                                        onCommitShape(ShapeKind.ARROW, startNorm, endNorm)
+                                    }
+                                    DrawToolType.LINE -> if (startNorm != null && endNorm != null) {
+                                        onCommitShape(ShapeKind.LINE, startNorm, endNorm)
+                                    }
+                                    DrawToolType.REDACTION -> if (startNorm != null && endNorm != null) {
+                                        onCommitShape(ShapeKind.REDACTION, startNorm, endNorm)
+                                    }
+                                    DrawToolType.ERASER -> {}
                                 }
                                 dragStartNorm = null
                                 dragCurrentNorm = null
@@ -434,12 +455,15 @@ fun PdfPageLayer(
                 )
             }
 
-            // 2. Saved Normalized Text Markup Annotations (Realistic Fluorescent Neon Highlighter Glow)
+            // 2. Saved Normalized Text Markup Annotations (High-Contrast Fluorescent Neon + Auto-Line-Fit Thickness + Live Opacity)
             for (markup in pageMarkups) {
-                val baseColor = parseComposeHex(markup.colorHex, Color(0xFFFFF01F))
+                val baseColor = parseComposeHex(markup.colorHex, Color(0xFFFFE600))
                 val isSelected = selectedExistingMarkup?.id == markup.id
+                val effOpacity = markup.opacity.coerceIn(0.15f, 0.95f)
+                val scale = markup.thicknessScale.coerceIn(0.50f, 2.0f)
 
-                for (r in markup.rects) {
+                for (rawRect in markup.rects) {
+                    val r = TextMarkupEngine.scaleRectForThickness(rawRect, scale, autoFitHighlighterToLine)
                     val left = r.x * w
                     val top = r.y * h
                     val widthPx = r.width * w
@@ -449,73 +473,89 @@ fun PdfPageLayer(
 
                     when (markup.style) {
                         MarkupStyle.HIGHLIGHT -> {
-                            val pad = 1.8.dp.toPx()
-                            // Outer subtle fluorescent marker glow
-                            drawRoundRect(
-                                color = baseColor.copy(alpha = if (isDarkPaper) 0.24f else 0.19f),
-                                topLeft = Offset(left - pad, top - pad),
-                                size = Size(widthPx + pad * 2f, heightPx + pad * 2f),
-                                cornerRadius = CornerRadius(5.5.dp.toPx())
-                            )
-                            // Authentic fluorescent chisel-tip ink body
+                            val pad = 2.0.dp.toPx()
+                            // High-contrast outer fluorescent luminescence halo
                             drawRoundRect(
                                 color = baseColor.copy(
-                                    alpha = if (isDarkPaper) {
-                                        markup.opacity.coerceIn(0.32f, 0.56f)
-                                    } else {
-                                        markup.opacity.coerceIn(0.42f, 0.72f)
-                                    }
+                                    alpha = if (isDarkPaper) (effOpacity * 0.46f).coerceIn(0.08f, 0.50f)
+                                    else (effOpacity * 0.38f).coerceIn(0.06f, 0.42f)
+                                ),
+                                topLeft = Offset(left - pad, top - pad),
+                                size = Size(widthPx + pad * 2f, heightPx + pad * 2f),
+                                cornerRadius = CornerRadius(6.dp.toPx())
+                            )
+                            // Saturated high-contrast fluorescent marker core respecting full user opacity
+                            drawRoundRect(
+                                color = baseColor.copy(
+                                    alpha = if (isDarkPaper) (effOpacity * 0.72f).coerceIn(0.15f, 0.78f)
+                                    else (effOpacity * 1.12f).coerceIn(0.15f, 0.96f)
                                 ),
                                 topLeft = Offset(left, top),
                                 size = Size(widthPx, heightPx),
                                 cornerRadius = CornerRadius(3.5.dp.toPx()),
                                 blendMode = if (isDarkPaper) BlendMode.SrcOver else BlendMode.Multiply
                             )
+                            // Crisp neon rim accent for unmistakable contrast on both light & AMOLED paper
+                            drawRoundRect(
+                                color = baseColor.copy(
+                                    alpha = if (isDarkPaper) (effOpacity * 0.95f).coerceIn(0.25f, 0.96f)
+                                    else (effOpacity * 0.52f).coerceIn(0.10f, 0.62f)
+                                ),
+                                topLeft = Offset(left, top),
+                                size = Size(widthPx, heightPx),
+                                cornerRadius = CornerRadius(3.5.dp.toPx()),
+                                style = Stroke(width = 0.9.dp.toPx())
+                            )
                         }
                         MarkupStyle.UNDERLINE -> {
+                            val lineBottom = (rawRect.y + rawRect.height) * h
                             drawLine(
-                                color = baseColor,
-                                start = Offset(left, bottom - 1.dp.toPx()),
-                                end = Offset(right, bottom - 1.dp.toPx()),
-                                strokeWidth = 2.6.dp.toPx(),
+                                color = baseColor.copy(alpha = effOpacity.coerceAtLeast(0.30f)),
+                                start = Offset(left, lineBottom - 1.dp.toPx()),
+                                end = Offset(right, lineBottom - 1.dp.toPx()),
+                                strokeWidth = (2.6f * scale).coerceIn(1.4f, 7.5f).dp.toPx(),
                                 cap = StrokeCap.Round
                             )
                         }
                         MarkupStyle.STRIKETHROUGH -> {
-                            val midY = top + heightPx * 0.52f
+                            val midY = (rawRect.y + rawRect.height * 0.52f) * h
                             drawLine(
-                                color = baseColor,
+                                color = baseColor.copy(alpha = effOpacity.coerceAtLeast(0.30f)),
                                 start = Offset(left, midY),
                                 end = Offset(right, midY),
-                                strokeWidth = 2.4.dp.toPx(),
+                                strokeWidth = (2.4f * scale).coerceIn(1.4f, 7.0f).dp.toPx(),
                                 cap = StrokeCap.Round
                             )
                         }
                         MarkupStyle.SQUIGGLY -> {
                             val wavePath = Path()
+                            val baseY = (rawRect.y + rawRect.height) * h
                             var x = left
                             val waveStep = 6.dp.toPx()
-                            val amp = 2.5.dp.toPx()
-                            wavePath.moveTo(x, bottom)
+                            val amp = (2.5f * scale.coerceIn(0.8f, 1.5f)).dp.toPx()
+                            wavePath.moveTo(x, baseY)
                             var up = true
                             while (x < right) {
                                 val nx = (x + waveStep).coerceAtMost(right)
-                                val cy = if (up) bottom - amp else bottom + amp
-                                wavePath.quadraticTo((x + nx) * 0.5f, cy, nx, bottom)
+                                val cy = if (up) baseY - amp else baseY + amp
+                                wavePath.quadraticTo((x + nx) * 0.5f, cy, nx, baseY)
                                 x = nx
                                 up = !up
                             }
                             drawPath(
                                 path = wavePath,
-                                color = baseColor,
-                                style = Stroke(width = 2.2.dp.toPx(), cap = StrokeCap.Round)
+                                color = baseColor.copy(alpha = effOpacity.coerceAtLeast(0.30f)),
+                                style = Stroke(
+                                    width = (2.2f * scale).coerceIn(1.3f, 6.5f).dp.toPx(),
+                                    cap = StrokeCap.Round
+                                )
                             )
                         }
                     }
 
                     if (isSelected) {
                         drawRoundRect(
-                            color = if (isDarkPaper) Color(0xFF00F0FF) else Color(0xFF1D4ED8),
+                            color = if (isDarkPaper) Color(0xFF00E5FF) else Color(0xFF1D4ED8),
                             topLeft = Offset(left - 2.dp.toPx(), top - 2.dp.toPx()),
                             size = Size(widthPx + 4.dp.toPx(), heightPx + 4.dp.toPx()),
                             cornerRadius = CornerRadius(5.dp.toPx()),
@@ -525,28 +565,53 @@ fun PdfPageLayer(
                 }
             }
 
-            // 3. Active Live Touch Selection Preview (Fluorescent Glow + Pin Lines)
+            // 3. Active Live Touch Selection Preview (Live Fluorescent Contrast + Opacity + Auto-Line-Fit Width)
             if (touchSelection != null && touchSelection.mergedLineRects.isNotEmpty()) {
-                val selColor = parseComposeHex(activeColorHex, Color(0xFFFFF01F))
-                val pad = 1.6.dp.toPx()
-                for (r in touchSelection.mergedLineRects) {
+                val selColor = parseComposeHex(activeColorHex, Color(0xFFFFE600))
+                val liveScale = TextMarkupEngine.computeHighlightThicknessScale(activeStrokeWidth)
+                val liveOpacity = activeOpacity.coerceIn(0.15f, 0.95f)
+                val pad = 2.0.dp.toPx()
+
+                for (rawR in touchSelection.mergedLineRects) {
+                    val r = TextMarkupEngine.scaleRectForThickness(rawR, liveScale, autoFitHighlighterToLine)
                     drawRoundRect(
-                        color = selColor.copy(alpha = 0.22f),
+                        color = selColor.copy(
+                            alpha = if (isDarkPaper) (liveOpacity * 0.46f).coerceIn(0.08f, 0.50f)
+                            else (liveOpacity * 0.38f).coerceIn(0.06f, 0.42f)
+                        ),
                         topLeft = Offset(r.x * w - pad, r.y * h - pad),
                         size = Size(r.width * w + pad * 2f, r.height * h + pad * 2f),
-                        cornerRadius = CornerRadius(5.dp.toPx())
+                        cornerRadius = CornerRadius(6.dp.toPx())
                     )
                     drawRoundRect(
-                        color = selColor.copy(alpha = if (isDarkPaper) 0.42f else 0.54f),
+                        color = selColor.copy(
+                            alpha = if (isDarkPaper) (liveOpacity * 0.72f).coerceIn(0.15f, 0.78f)
+                            else (liveOpacity * 1.12f).coerceIn(0.15f, 0.96f)
+                        ),
                         topLeft = Offset(r.x * w, r.y * h),
                         size = Size(r.width * w, r.height * h),
                         cornerRadius = CornerRadius(3.5.dp.toPx()),
                         blendMode = if (isDarkPaper) BlendMode.SrcOver else BlendMode.Multiply
                     )
+                    drawRoundRect(
+                        color = selColor.copy(alpha = (liveOpacity * 0.85f).coerceIn(0.20f, 0.95f)),
+                        topLeft = Offset(r.x * w, r.y * h),
+                        size = Size(r.width * w, r.height * h),
+                        cornerRadius = CornerRadius(3.5.dp.toPx()),
+                        style = Stroke(width = 0.9.dp.toPx())
+                    )
                 }
-                val firstR = touchSelection.mergedLineRects.first()
-                val lastR = touchSelection.mergedLineRects.last()
-                val handleColor = if (isDarkPaper) Color(0xFF00F0FF) else Color(0xFF1D4ED8)
+                val firstR = TextMarkupEngine.scaleRectForThickness(
+                    touchSelection.mergedLineRects.first(),
+                    liveScale,
+                    autoFitHighlighterToLine
+                )
+                val lastR = TextMarkupEngine.scaleRectForThickness(
+                    touchSelection.mergedLineRects.last(),
+                    liveScale,
+                    autoFitHighlighterToLine
+                )
+                val handleColor = if (isDarkPaper) Color(0xFF00E5FF) else Color(0xFF1D4ED8)
                 drawLine(
                     color = handleColor,
                     start = Offset(firstR.x * w, firstR.y * h),
@@ -563,14 +628,41 @@ fun PdfPageLayer(
                 )
             }
 
-            // 4. Saved Freehand Quadratic Bezier Ink Strokes
+            // 3B. Live 2-Second Hold Progress Ring (tactile feedback while holding >= 2s to activate text highlight)
+            val ringCenter = holdIndicatorOffset
+            if (ringCenter != null && holdProgress > 0.01f) {
+                val ringRadius = 24.dp.toPx()
+                val ringColor = parseComposeHex(activeColorHex, Color(0xFFFFE600))
+                drawCircle(
+                    color = Color.Black.copy(alpha = 0.30f),
+                    radius = ringRadius + 3.dp.toPx(),
+                    center = ringCenter
+                )
+                drawCircle(
+                    color = Color.White.copy(alpha = 0.45f),
+                    radius = ringRadius,
+                    center = ringCenter,
+                    style = Stroke(width = 3.dp.toPx())
+                )
+                drawArc(
+                    color = ringColor,
+                    startAngle = -90f,
+                    sweepAngle = holdProgress * 360f,
+                    useCenter = false,
+                    topLeft = Offset(ringCenter.x - ringRadius, ringCenter.y - ringRadius),
+                    size = Size(ringRadius * 2f, ringRadius * 2f),
+                    style = Stroke(width = 4.dp.toPx(), cap = StrokeCap.Round)
+                )
+            }
+
+            // 4. Saved Freehand Quadratic Bezier Ink & Marker Strokes (respecting exact opacity & width)
             for (stroke in pageInk) {
                 if (stroke.points.size < 2) continue
                 val color = parseComposeHex(stroke.colorHex, Color(0xFF355266))
                 val path = buildComposeBezierPath(stroke.points, w, h)
                 drawPath(
                     path = path,
-                    color = color.copy(alpha = if (stroke.isHighlighter) 0.38f else stroke.opacity),
+                    color = color.copy(alpha = stroke.opacity.coerceIn(0.15f, 0.98f)),
                     style = Stroke(
                         width = (if (stroke.isHighlighter) stroke.strokeWidth * 3f else stroke.strokeWidth).dp.toPx(),
                         cap = StrokeCap.Round,
@@ -586,7 +678,7 @@ fun PdfPageLayer(
                 val path = buildComposeBezierPath(liveInkPoints, w, h)
                 drawPath(
                     path = path,
-                    color = color.copy(alpha = if (isMarker) 0.38f else 0.92f),
+                    color = color.copy(alpha = activeOpacity.coerceIn(0.15f, 0.98f)),
                     style = Stroke(
                         width = (if (isMarker) activeStrokeWidth * 3f else activeStrokeWidth).dp.toPx(),
                         cap = StrokeCap.Round,
@@ -1224,6 +1316,7 @@ fun TouchSelectionGlassPill(
     activeColorHex: String,
     onSelectColorAndCommit: (String) -> Unit,
     onSelectStyleAndCommit: (MarkupStyle) -> Unit,
+    onOpenStyleProperties: () -> Unit = {},
     onExpandLine: () -> Unit = {},
     onExpandParagraph: () -> Unit = {},
     onCopyText: () -> Unit,
@@ -1335,6 +1428,17 @@ fun TouchSelectionGlassPill(
                     selected = currentStyle == MarkupStyle.SQUIGGLY,
                     onClick = { onSelectStyleAndCommit(MarkupStyle.SQUIGGLY) }
                 )
+
+                GlassPill(
+                    onClick = onOpenStyleProperties,
+                    contentPaddingHorizontal = 9.dp,
+                    contentPaddingVertical = 7.dp,
+                    modifier = Modifier.testTag("selection_opacity_width_button")
+                ) {
+                    Icon(Icons.Default.Tune, "Width & Opacity", tint = glass.accent, modifier = Modifier.size(15.dp))
+                    Spacer(Modifier.width(3.dp))
+                    Text("Style", style = MaterialTheme.typography.labelSmall, color = glass.primaryText)
+                }
 
                 GlassPill(
                     onClick = onAskAiAboutSelection,

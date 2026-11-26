@@ -78,6 +78,7 @@ data class TextMarkupAnnotation(
     val rects: List<NormalizedRect>,
     val selectedText: String,
     val note: String = "",
+    val thicknessScale: Float = 1.0f,
     val createdAt: Long = System.currentTimeMillis()
 ) {
     fun toJson(): JSONObject = JSONObject().apply {
@@ -88,6 +89,7 @@ data class TextMarkupAnnotation(
         put("opacity", opacity.toDouble())
         put("selectedText", selectedText)
         put("note", note)
+        put("thicknessScale", thicknessScale.toDouble())
         put("createdAt", createdAt)
         val arr = JSONArray()
         rects.forEach { arr.put(it.toJson()) }
@@ -106,11 +108,12 @@ data class TextMarkupAnnotation(
                 id = obj.optString("id", "markup_${System.nanoTime()}"),
                 pageIndex = obj.optInt("pageIndex", 0),
                 style = style,
-                colorHex = obj.optString("colorHex", "#E6C26E"),
-                opacity = obj.optDouble("opacity", 0.38).toFloat(),
+                colorHex = obj.optString("colorHex", "#FFE600"),
+                opacity = obj.optDouble("opacity", 0.62).toFloat().coerceIn(0.15f, 0.95f),
                 rects = rects,
                 selectedText = obj.optString("selectedText", ""),
                 note = obj.optString("note", ""),
+                thicknessScale = obj.optDouble("thicknessScale", 1.0).toFloat().coerceIn(0.50f, 2.0f),
                 createdAt = obj.optLong("createdAt", System.currentTimeMillis())
             )
         }
@@ -570,7 +573,9 @@ data class AppSettings(
     val showFastScrollScrubber: Boolean = true,
     val rememberLastPage: Boolean = true,
     val defaultAuthorName: String = "Elena Rostova",
-    val defaultHighlightOpacity: Float = 0.46f,
+    val defaultHighlightOpacity: Float = 0.62f,
+    val defaultStrokeWidth: Float = 3.5f,
+    val autoFitHighlighterToLine: Boolean = true,
     val preferredAiLanguage: AiLanguageOption = AiLanguageOption.ENGLISH,
     val customAiLanguage: String = "",
     val force144HzPerformanceMode: Boolean = true
@@ -598,6 +603,8 @@ data class AppSettings(
         put("rememberLastPage", rememberLastPage)
         put("defaultAuthorName", defaultAuthorName)
         put("defaultHighlightOpacity", defaultHighlightOpacity.toDouble())
+        put("defaultStrokeWidth", defaultStrokeWidth.toDouble())
+        put("autoFitHighlighterToLine", autoFitHighlighterToLine)
         put("preferredAiLanguage", preferredAiLanguage.name)
         put("customAiLanguage", customAiLanguage)
         put("force144HzPerformanceMode", force144HzPerformanceMode)
@@ -640,7 +647,9 @@ data class AppSettings(
                     showFastScrollScrubber = obj.optBoolean("showFastScrollScrubber", true),
                     rememberLastPage = obj.optBoolean("rememberLastPage", true),
                     defaultAuthorName = obj.optString("defaultAuthorName", "Elena Rostova"),
-                    defaultHighlightOpacity = obj.optDouble("defaultHighlightOpacity", 0.46).toFloat().coerceIn(0.25f, 0.78f),
+                    defaultHighlightOpacity = obj.optDouble("defaultHighlightOpacity", 0.62).toFloat().coerceIn(0.15f, 0.95f),
+                    defaultStrokeWidth = obj.optDouble("defaultStrokeWidth", 3.5).toFloat().coerceIn(1.5f, 14f),
+                    autoFitHighlighterToLine = obj.optBoolean("autoFitHighlighterToLine", true),
                     preferredAiLanguage = aiLang,
                     customAiLanguage = obj.optString("customAiLanguage", ""),
                     force144HzPerformanceMode = obj.optBoolean("force144HzPerformanceMode", true)
@@ -661,18 +670,18 @@ enum class AiImageModelOption(
     val subtitle: String
 ) {
     NANO_BANANA_2_1(
-        modelId = "gemini-2.0-flash-exp-image-generation",
-        displayName = "Gemini Flash Image",
+        modelId = "gemini-2.5-flash-image",
+        displayName = "Gemini 2.5 Image",
         subtitle = "Fast native synthesis"
     ),
     GEMINI_3_PRO_IMAGE(
-        modelId = "imagen-3.0-generate-002",
-        displayName = "Imagen 3 Studio",
-        subtitle = "High-detail editorial art"
+        modelId = "gemini-3-pro-image-preview",
+        displayName = "Gemini 3 Pro Image",
+        subtitle = "High-detail studio art"
     ),
     GEMINI_3_1_FLASH_LITE_IMAGE(
-        modelId = "gemini-2.5-flash-image-preview",
-        displayName = "Gemini 2.5 Image",
+        modelId = "gemini-3.1-flash-image-preview",
+        displayName = "Gemini 3.1 Image",
         subtitle = "Next-gen visual studio"
     )
 }

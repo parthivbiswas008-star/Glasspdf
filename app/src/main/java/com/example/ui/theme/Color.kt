@@ -64,12 +64,12 @@ data class EditorialSwatch(
 )
 
 val FluorescentHighlightSwatches = listOf(
-    EditorialSwatch("Yellow", "#FFF01F", Color(0xFFFFF01F), Color(0xFFFFEA00)),
-    EditorialSwatch("Lime", "#39FF14", Color(0xFF39FF14), Color(0xFF52FF33)),
-    EditorialSwatch("Pink", "#FF2E93", Color(0xFFFF2E93), Color(0xFFFF4DA6)),
-    EditorialSwatch("Cyan", "#00F0FF", Color(0xFF00F0FF), Color(0xFF33F5FF)),
-    EditorialSwatch("Orange", "#FF7A00", Color(0xFFFF7A00), Color(0xFFFF9529)),
-    EditorialSwatch("Violet", "#C44DFF", Color(0xFFC44DFF), Color(0xFFD475FF))
+    EditorialSwatch("Yellow", "#FFE600", Color(0xFFFFE600), Color(0xFFFFF53D)),
+    EditorialSwatch("Lime", "#00FF38", Color(0xFF00FF38), Color(0xFF39FF5E)),
+    EditorialSwatch("Pink", "#FF0080", Color(0xFFFF0080), Color(0xFFFF3399)),
+    EditorialSwatch("Cyan", "#00E5FF", Color(0xFF00E5FF), Color(0xFF33EEFF)),
+    EditorialSwatch("Orange", "#FF5E00", Color(0xFFFF5E00), Color(0xFFFF7E29)),
+    EditorialSwatch("Violet", "#B517FF", Color(0xFFB517FF), Color(0xFFC94DFF))
 )
 
 // Backwards-compatible alias referencing the upgraded Fluorescent Highlighter palette

@@ -193,6 +193,35 @@ class ExampleRobolectricTest {
         assertEquals("Bangla (বাংলা)", restored.effectiveAiLanguageLabel)
         assertEquals("BANG", restored.effectiveAiLanguageBadge)
     }
+
+    @Test
+    fun `snapshot and appSettings persist highlighter thicknessScale, opacity, strokeWidth, and autoFitToLine`() {
+        val snap = DocumentAnnotationsSnapshot(
+            markups = listOf(
+                TextMarkupAnnotation(
+                    id = "m_thick",
+                    pageIndex = 0,
+                    style = MarkupStyle.HIGHLIGHT,
+                    colorHex = "#FFE600",
+                    opacity = 0.88f,
+                    thicknessScale = 1.45f,
+                    rects = listOf(NormalizedRect(0.12f, 0.22f, 0.60f, 0.036f)),
+                    selectedText = "High contrast heading"
+                )
+            )
+        )
+        val restoredSnap = DocumentAnnotationsSnapshot.fromJsonString(snap.toJsonString())
+        assertEquals(0.88f, restoredSnap.markups.first().opacity, 0.001f)
+        assertEquals(1.45f, restoredSnap.markups.first().thicknessScale, 0.001f)
+
+        val settings = AppSettings(
+            defaultHighlightOpacity = 0.85f,
+            defaultStrokeWidth = 9.5f,
+            autoFitHighlighterToLine = false
+        )
+        val restoredSettings = AppSettings.fromJsonString(settings.toJsonString())
+        assertEquals(0.85f, restoredSettings.defaultHighlightOpacity, 0.001f)
+        assertEquals(9.5f, restoredSettings.defaultStrokeWidth, 0.001f)
+        assertEquals(false, restoredSettings.autoFitHighlighterToLine)
+    }
 }
-
-

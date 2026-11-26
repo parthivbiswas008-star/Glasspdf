@@ -201,30 +201,36 @@ object PdfProEngine {
         // 1. Text Markups (Highlight, Underline, Strikethrough, Squiggly)
         val pageMarkups = snapshot.markups.filter { it.pageIndex == pageIndex }
         for (markup in pageMarkups) {
-            val baseColor = parseHexColorSafe(markup.colorHex, Color.parseColor("#E6C26E"))
+            val baseColor = parseHexColorSafe(markup.colorHex, Color.parseColor("#FFE600"))
+            val scale = markup.thicknessScale.coerceIn(0.50f, 2.0f)
+            val effectiveOpacity = markup.opacity.coerceIn(0.15f, 0.95f)
             for (normRect in markup.rects) {
                 val left = normRect.x * pageWidth
-                val top = normRect.y * pageHeight
+                val rawTop = normRect.y * pageHeight
+                val rawHeight = normRect.height * pageHeight
+                val scaledHeight = (rawHeight * scale).coerceIn(5f, pageHeight * 0.14f)
+                val centerY = rawTop + rawHeight * 0.5f
+                val top = (centerY - scaledHeight * 0.5f).coerceIn(0f, pageHeight - scaledHeight)
                 val right = left + normRect.width * pageWidth
-                val bottom = top + normRect.height * pageHeight
+                val bottom = top + scaledHeight
 
                 when (markup.style) {
                     MarkupStyle.HIGHLIGHT -> {
-                        // Subtle outer fluorescent glow halo + crisp translucent highlighter ink
+                        // Outer high-contrast fluorescent halo + vivid translucent highlighter core
                         val glowPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
                             color = baseColor
-                            alpha = (markup.opacity.coerceIn(0.28f, 0.78f) * 72).toInt()
+                            alpha = (effectiveOpacity * 105f).toInt().coerceIn(22, 120)
                             style = Paint.Style.FILL
                         }
                         canvas.drawRoundRect(
-                            RectF(left - 1.5f, top - 1f, right + 1.5f, bottom + 1f),
-                            4f,
-                            4f,
+                            RectF(left - 1.8f, top - 1.2f, right + 1.8f, bottom + 1.2f),
+                            4.5f,
+                            4.5f,
                             glowPaint
                         )
                         val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
                             color = baseColor
-                            alpha = (markup.opacity.coerceIn(0.32f, 0.78f) * 255).toInt()
+                            alpha = (effectiveOpacity * 255f).toInt().coerceIn(38, 245)
                             style = Paint.Style.FILL
                             xfermode = PorterDuffXfermode(PorterDuff.Mode.MULTIPLY)
                         }
@@ -233,36 +239,39 @@ object PdfProEngine {
                     MarkupStyle.UNDERLINE -> {
                         val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
                             color = baseColor
-                            strokeWidth = 2.2f
+                            alpha = (effectiveOpacity * 255f).toInt().coerceIn(60, 255)
+                            strokeWidth = (2.2f * scale).coerceIn(1.2f, 6.5f)
                             style = Paint.Style.STROKE
                         }
-                        canvas.drawLine(left, bottom - 1f, right, bottom - 1f, paint)
+                        canvas.drawLine(left, rawTop + rawHeight - 1f, right, rawTop + rawHeight - 1f, paint)
                     }
                     MarkupStyle.STRIKETHROUGH -> {
                         val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
                             color = baseColor
-                            strokeWidth = 2.0f
+                            alpha = (effectiveOpacity * 255f).toInt().coerceIn(60, 255)
+                            strokeWidth = (2.0f * scale).coerceIn(1.2f, 6.0f)
                             style = Paint.Style.STROKE
                         }
-                        val midY = (top + bottom) * 0.5f
-                        canvas.drawLine(left, midY, right, midY, paint)
+                        canvas.drawLine(left, centerY, right, centerY, paint)
                     }
                     MarkupStyle.SQUIGGLY -> {
                         val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
                             color = baseColor
-                            strokeWidth = 1.8f
+                            alpha = (effectiveOpacity * 255f).toInt().coerceIn(60, 255)
+                            strokeWidth = (1.8f * scale).coerceIn(1.2f, 5.5f)
                             style = Paint.Style.STROKE
                         }
                         val path = Path()
                         var x = left
                         val waveLen = 6f
-                        val amp = 2.2f
-                        path.moveTo(x, bottom)
+                        val amp = 2.2f * scale.coerceIn(0.8f, 1.5f)
+                        val baseY = rawTop + rawHeight
+                        path.moveTo(x, baseY)
                         var toggle = true
                         while (x < right) {
                             val nextX = (x + waveLen).coerceAtMost(right)
-                            val ctrlY = if (toggle) bottom - amp else bottom + amp
-                            path.quadTo((x + nextX) * 0.5f, ctrlY, nextX, bottom)
+                            val ctrlY = if (toggle) baseY - amp else baseY + amp
+                            path.quadTo((x + nextX) * 0.5f, ctrlY, nextX, baseY)
                             x = nextX
                             toggle = !toggle
                         }
@@ -278,7 +287,7 @@ object PdfProEngine {
             if (stroke.points.size < 2) continue
             val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
                 color = parseHexColorSafe(stroke.colorHex, Color.parseColor("#355266"))
-                alpha = ((if (stroke.isHighlighter) 0.38f else stroke.opacity) * 255).toInt()
+                alpha = (stroke.opacity.coerceIn(0.15f, 1.0f) * 255f).toInt()
                 strokeWidth = if (stroke.isHighlighter) stroke.strokeWidth * 3.2f else stroke.strokeWidth
                 style = Paint.Style.STROKE
                 strokeCap = Paint.Cap.ROUND
@@ -1083,7 +1092,8 @@ object PdfProEngine {
             val marginYStart = (sampleH * 0.03f).toInt()
             val marginYEnd = (sampleH * 0.97f).toInt()
 
-            // 1. Horizontal ink projection to find text rows
+            // 1. Horizontal ink projection to measure exact per-line vertical spans (headings, body, footnotes)
+            val rowInkCounts = IntArray(sampleH)
             val rowHasInk = BooleanArray(sampleH)
             for (y in marginYStart until marginYEnd) {
                 var inkCount = 0
@@ -1091,6 +1101,7 @@ object PdfProEngine {
                 for (x in marginXStart until marginXEnd) {
                     if (isInk(pixels[rowOffset + x])) inkCount++
                 }
+                rowInkCounts[y] = inkCount
                 rowHasInk[y] = inkCount >= 2
             }
 
@@ -1102,15 +1113,37 @@ object PdfProEngine {
                     while (y < marginYEnd && rowHasInk[y]) y++
                     val endY = y - 1
                     val bandH = endY - startY + 1
-                    // Split overly tall bands (e.g., diagrams or tight paragraphs) into readable line strips
-                    if (bandH in 2..14) {
+                    // Preserve exact font-line height for footnotes, body text, AND large headings (up to 22px)
+                    if (bandH in 2..22) {
                         lineBands.add(startY..endY)
-                    } else if (bandH > 14) {
-                        var subY = startY
-                        while (subY <= endY) {
-                            val subEnd = (subY + 7).coerceAtMost(endY)
-                            lineBands.add(subY..subEnd)
-                            subY += 9
+                    } else if (bandH > 22) {
+                        // Split tight multi-line blocks cleanly at low-ink horizontal troughs
+                        var subStart = startY
+                        var cursor = startY + 5
+                        while (cursor < endY - 4) {
+                            if (rowInkCounts[cursor] <= 4 && (cursor - subStart) >= 5) {
+                                lineBands.add(subStart..cursor)
+                                subStart = cursor + 1
+                                cursor += 5
+                            } else if ((cursor - subStart) >= 12) {
+                                // Pick minimum-ink row within local window to avoid slicing glyphs
+                                var bestSplit = cursor
+                                var bestCount = rowInkCounts[cursor]
+                                for (probe in (cursor - 2)..(cursor + 2).coerceAtMost(endY - 2)) {
+                                    if (rowInkCounts[probe] < bestCount) {
+                                        bestCount = rowInkCounts[probe]
+                                        bestSplit = probe
+                                    }
+                                }
+                                lineBands.add(subStart..bestSplit)
+                                subStart = bestSplit + 1
+                                cursor = subStart + 5
+                            } else {
+                                cursor++
+                            }
+                        }
+                        if (subStart <= endY) {
+                            lineBands.add(subStart..endY)
                         }
                     }
                 } else {
@@ -1121,7 +1154,7 @@ object PdfProEngine {
             val detectedWords = mutableListOf<PdfTextWord>()
             var lineIdx = 0
 
-            // 2. For each detected horizontal line band, segment into granular word boxes
+            // 2. For each detected horizontal line band, segment into granular word boxes with exact line-fitted height
             for (band in lineBands) {
                 val colHasInk = BooleanArray(sampleW)
                 for (x in marginXStart until marginXEnd) {
@@ -1141,9 +1174,10 @@ object PdfProEngine {
 
                 var x = marginXStart
                 var wordNumInLine = 1
-                val normY = (band.first.toFloat() / sampleH.toFloat() - 0.003f).coerceIn(0.015f, 0.96f)
-                val normH = ((band.last - band.first + 1).toFloat() / sampleH.toFloat() + 0.007f)
-                    .coerceIn(0.015f, 0.036f)
+                val rawBandH = (band.last - band.first + 1).toFloat() / sampleH.toFloat()
+                val padV = (rawBandH * 0.14f).coerceIn(0.002f, 0.0055f)
+                val normY = (band.first.toFloat() / sampleH.toFloat() - padV).coerceIn(0.012f, 0.96f)
+                val normH = (rawBandH + padV * 2f).coerceIn(0.011f, 0.072f)
 
                 while (x < marginXEnd) {
                     if (colHasInk[x]) {

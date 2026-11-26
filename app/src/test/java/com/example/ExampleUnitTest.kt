@@ -126,6 +126,27 @@ class ExampleUnitTest {
         assertEquals(0.18f, selection.mergedLineRects.first().x, 0.001f)
         assertEquals(0.64f, selection.mergedLineRects.first().right, 0.001f)
     }
+
+    @Test
+    fun textMarkupEngine_thicknessScaleAndAutoFitLineHeightWorkCorrectly() {
+        assertEquals(1.0f, TextMarkupEngine.computeHighlightThicknessScale(3.5f), 0.01f)
+        assertTrue(TextMarkupEngine.computeHighlightThicknessScale(1.5f) < 0.70f)
+        assertTrue(TextMarkupEngine.computeHighlightThicknessScale(14.0f) > 1.80f)
+
+        val headingRect = NormalizedRect(0.10f, 0.12f, 0.50f, 0.052f)
+        val bodyRect = NormalizedRect(0.10f, 0.30f, 0.50f, 0.018f)
+
+        val autoHeading = TextMarkupEngine.scaleRectForThickness(headingRect, thicknessScale = 1.0f, autoFitToLine = true)
+        val autoBody = TextMarkupEngine.scaleRectForThickness(bodyRect, thicknessScale = 1.0f, autoFitToLine = true)
+        assertTrue("Heading highlight should stay taller than body highlight when auto-fit is enabled", autoHeading.height > autoBody.height * 2.0f)
+
+        val thickerBody = TextMarkupEngine.scaleRectForThickness(bodyRect, thicknessScale = 1.6f, autoFitToLine = true)
+        assertTrue("Increasing thicknessScale must visibly expand highlight height", thickerBody.height > autoBody.height)
+
+        val fixedHeading = TextMarkupEngine.scaleRectForThickness(headingRect, thicknessScale = 1.0f, autoFitToLine = false)
+        val fixedBody = TextMarkupEngine.scaleRectForThickness(bodyRect, thicknessScale = 1.0f, autoFitToLine = false)
+        assertEquals(fixedHeading.height, fixedBody.height, 0.0001f)
+    }
 }
 
 

@@ -120,22 +120,66 @@ fun PropertiesGlassSheet(
     activeStrokeWidth: Float,
     activeOpacity: Float,
     activeFontId: String,
+    autoFitHighlighterToLine: Boolean = true,
     onSelectColor: (String) -> Unit,
     onStrokeWidthChange: (Float) -> Unit,
     onOpacityChange: (Float) -> Unit,
+    onToggleAutoFitLine: (Boolean) -> Unit = {},
     onSelectFont: (String) -> Unit,
     onDismiss: () -> Unit
 ) {
     val glass = LocalLiquidGlass.current
+    val previewColor = parseComposeHex(activeColorHex, Color(0xFFFFE600))
+    val thicknessScale = com.example.engines.TextMarkupEngine.computeHighlightThicknessScale(activeStrokeWidth)
 
     GlassSheet(
         visible = visible,
-        title = "Style & Fluorescent Ink",
-        subtitle = "Fluorescent Neon Swatches, Stroke & Opacity",
+        title = "Fluorescent Highlighter & Ink",
+        subtitle = "Live Contrast, Line-Fit Width & Opacity Controls",
         onDismiss = onDismiss
     ) {
         Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
-            Text("Fluorescent Highlighter Swatches", style = MaterialTheme.typography.labelLarge, color = glass.primaryText)
+            // Live Fluorescent Highlighter Contrast / Opacity / Width Preview Strip
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(62.dp)
+                    .clip(RoundedCornerShape(16.dp))
+                    .background(Color(0xFFFAF8F3))
+                    .border(1.dp, glass.rimBorder, RoundedCornerShape(16.dp)),
+                contentAlignment = Alignment.Center
+            ) {
+                val bandHeightDp = (18f * thicknessScale).coerceIn(10f, 38f).dp
+                // Soft neon outer glow
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth(0.84f)
+                        .height(bandHeightDp + 5.dp)
+                        .clip(RoundedCornerShape(7.dp))
+                        .background(previewColor.copy(alpha = (activeOpacity * 0.42f).coerceIn(0.08f, 0.45f)))
+                )
+                // High-contrast fluorescent core band
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth(0.82f)
+                        .height(bandHeightDp)
+                        .clip(RoundedCornerShape(5.dp))
+                        .background(previewColor.copy(alpha = activeOpacity.coerceIn(0.15f, 0.95f)))
+                        .border(
+                            width = 0.8.dp,
+                            color = previewColor.copy(alpha = (activeOpacity + 0.18f).coerceAtMost(1f)),
+                            shape = RoundedCornerShape(5.dp)
+                        )
+                )
+                Text(
+                    text = "Fluorescent Line Preview • ${(activeOpacity * 100).toInt()}% • ${String.format("%.2f", thicknessScale)}x",
+                    style = MaterialTheme.typography.labelLarge,
+                    fontWeight = FontWeight.Bold,
+                    color = Color(0xFF101216)
+                )
+            }
+
+            Text("High-Contrast Fluorescent Swatches", style = MaterialTheme.typography.labelLarge, color = glass.primaryText)
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -151,9 +195,9 @@ fun PropertiesGlassSheet(
                     ) {
                         Box(
                             modifier = Modifier
-                                .size(38.dp)
+                                .size(40.dp)
                                 .shadow(
-                                    elevation = if (selected) 10.dp else 4.dp,
+                                    elevation = if (selected) 12.dp else 4.dp,
                                     shape = CircleShape,
                                     ambientColor = swatch.glowColor,
                                     spotColor = swatch.glowColor
@@ -177,23 +221,64 @@ fun PropertiesGlassSheet(
                 }
             }
 
+            // Auto-Fit Highlighter Width to Text Line Toggle
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(16.dp))
+                    .background(glass.accentSoft.copy(alpha = 0.55f))
+                    .border(1.dp, glass.rimBorder, RoundedCornerShape(16.dp))
+                    .clickable { onToggleAutoFitLine(!autoFitHighlighterToLine) }
+                    .padding(horizontal = 12.dp, vertical = 10.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "Auto-Fit Width to Text Line",
+                        style = MaterialTheme.typography.labelLarge,
+                        color = glass.primaryText
+                    )
+                    Text(
+                        text = "Adapts highlighter thickness automatically to each line's font height",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = glass.secondaryText
+                    )
+                }
+                GlassPill(
+                    onClick = { onToggleAutoFitLine(!autoFitHighlighterToLine) },
+                    isSelected = autoFitHighlighterToLine,
+                    contentPaddingHorizontal = 10.dp,
+                    contentPaddingVertical = 5.dp,
+                    modifier = Modifier.testTag("properties_autofit_line_toggle")
+                ) {
+                    Text(
+                        text = if (autoFitHighlighterToLine) "AUTO" else "FIXED",
+                        fontFamily = JetBrainsTabularFamily,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = glass.primaryText
+                    )
+                }
+            }
+
             Column {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween
                 ) {
-                    Text("Stroke Width", style = MaterialTheme.typography.labelLarge, color = glass.primaryText)
+                    Text("Highlighter & Stroke Width", style = MaterialTheme.typography.labelLarge, color = glass.primaryText)
                     Text(
-                        text = "${String.format("%.1f", activeStrokeWidth)} pt",
+                        text = "${String.format("%.1f", activeStrokeWidth)} pt (${String.format("%.2f", thicknessScale)}x)",
                         fontFamily = JetBrainsTabularFamily,
                         style = MaterialTheme.typography.labelSmall,
                         color = glass.accent
                     )
                 }
                 Slider(
-                    value = activeStrokeWidth,
+                    value = activeStrokeWidth.coerceIn(1.5f, 14f),
                     onValueChange = onStrokeWidthChange,
-                    valueRange = 1.5f..14f
+                    valueRange = 1.5f..14f,
+                    modifier = Modifier.testTag("properties_width_slider")
                 )
             }
 
@@ -202,7 +287,7 @@ fun PropertiesGlassSheet(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween
                 ) {
-                    Text("Layer Opacity", style = MaterialTheme.typography.labelLarge, color = glass.primaryText)
+                    Text("Highlighter & Ink Opacity", style = MaterialTheme.typography.labelLarge, color = glass.primaryText)
                     Text(
                         text = "${(activeOpacity * 100).toInt()}%",
                         fontFamily = JetBrainsTabularFamily,
@@ -211,9 +296,10 @@ fun PropertiesGlassSheet(
                     )
                 }
                 Slider(
-                    value = activeOpacity,
+                    value = activeOpacity.coerceIn(0.15f, 0.95f),
                     onValueChange = onOpacityChange,
-                    valueRange = 0.20f..1.0f
+                    valueRange = 0.15f..0.95f,
+                    modifier = Modifier.testTag("properties_opacity_slider")
                 )
             }
 
